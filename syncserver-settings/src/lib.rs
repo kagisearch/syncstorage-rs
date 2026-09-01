@@ -2,7 +2,6 @@
 extern crate slog_scope;
 
 use config::{Config, ConfigError, Environment, File};
-use regex::Regex;
 use serde::{Deserialize, Deserializer};
 use syncserver_common::{
     X_LAST_MODIFIED, X_VERIFY_CODE, X_WEAVE_BYTES, X_WEAVE_NEXT_OFFSET, X_WEAVE_RECORDS,
@@ -12,7 +11,6 @@ use syncstorage_settings::Settings as SyncstorageSettings;
 use tokenserver_settings::Settings as TokenserverSettings;
 use url::Url;
 
-pub const COLLECTION_ID_REGEX: &str = r"[a-zA-Z0-9._-]{1,32}";
 static PREFIX: &str = "sync";
 
 #[derive(Clone, Debug, Deserialize)]
@@ -80,15 +78,7 @@ impl Settings {
         builder = builder.add_source(
             Environment::with_prefix(&PREFIX.to_uppercase())
                 .separator("__")
-                .prefix_separator("_")
-                // Allow specific Vec<String> settings to be provided
-                // via a comma-separated env var. `with_list_parse_key`
-                // restricts list-splitting to the named key so
-                // ordinary string settings that happen to contain
-                // commas are untouched.
-                .list_separator(",")
-                .with_list_parse_key("syncstorage.gcs_payload_offload_collections")
-                .try_parsing(true),
+                .prefix_separator("_"),
         );
         let settings: Config = builder.build()?;
 
@@ -178,48 +168,14 @@ impl Settings {
             ));
         }
 
-        // overriding limits must be > 0 and validate names while we're at it
-        let coll_regex = Regex::new(&format!("^{}$", COLLECTION_ID_REGEX)).unwrap();
+        // overriding limits must be > 0.
         for (name, overrides) in &self.syncstorage.limits.collections {
-            if !coll_regex.is_match(name) {
+            if overrides.max_record_payload_bytes == Some(0) {
                 return Err(ConfigError::Message(format!(
                     "Invalid SYNC_SYNCSTORAGE__LIMITS__COLLECTIONS: \
-                         Invalid collection name format for \"{name}\""
+                     \"{name}\" max_record_payload_bytes must be greater than 0"
                 )));
             }
-            for (field, value) in [
-                (
-                    "max_record_payload_bytes",
-                    overrides.max_record_payload_bytes,
-                ),
-                ("max_post_bytes", overrides.max_post_bytes),
-                ("max_request_bytes", overrides.max_request_bytes),
-            ] {
-                if value == Some(0) {
-                    return Err(ConfigError::Message(format!(
-                        "Invalid SYNC_SYNCSTORAGE__LIMITS__COLLECTIONS: \
-                         \"{name}\" {field} must be greater than 0"
-                    )));
-                }
-            }
-        }
-
-        // GCS payload off-load is only wired up for the Spanner backend. On
-        // mysql/postgres the payload_link column does not exist, so an
-        // off-loaded write would upload to GCS, clear the inline payload, then
-        // persist a row with no link and lose the payload. Refuse to boot when
-        // it's configured against a non-Spanner backend.
-        if self.syncstorage.enabled
-            && !self.syncstorage.uses_spanner()
-            && (self.syncstorage.gcs_payload_bucket.is_some()
-                || !self.syncstorage.gcs_payload_offload_collections.is_empty())
-        {
-            return Err(ConfigError::Message(
-                "GCS payload off-load (SYNC_SYNCSTORAGE__GCS_PAYLOAD_BUCKET / \
-                 SYNC_SYNCSTORAGE__GCS_PAYLOAD_OFFLOAD_COLLECTIONS) is only \
-                 supported on the Spanner backend"
-                    .to_owned(),
-            ));
         }
 
         if let Some(init_node_url) = &self.tokenserver.init_node_url {
@@ -476,62 +432,27 @@ mod test {
                 ("SYNC_TOKENSERVER__ENABLED", None),
                 (
                     "SYNC_SYNCSTORAGE__LIMITS__COLLECTIONS",
-                    Some(
-                        r#"{"newtab-images":{"max_record_payload_bytes":20971520,"max_post_bytes":26214400,"max_request_bytes":26218496}}"#,
-                    ),
+                    Some(r#"{"newtab-images":{"max_record_payload_bytes":20971520}}"#),
                 ),
             ],
             || {
                 let settings = Settings::with_env_and_config_file(None)
                     .expect("a collection limits override should validate");
-                let entry = settings
-                    .syncstorage
-                    .limits
-                    .collections
-                    .get("newtab-images")
-                    .expect("override present");
-                assert_eq!(entry.max_record_payload_bytes, Some(20_971_520));
-                assert_eq!(entry.max_post_bytes, Some(26_214_400));
-                assert_eq!(entry.max_request_bytes, Some(26_218_496));
+                assert_eq!(
+                    settings
+                        .syncstorage
+                        .limits
+                        .collections
+                        .get("newtab-images")
+                        .and_then(|o| o.max_record_payload_bytes),
+                    Some(20_971_520)
+                );
             },
         );
     }
 
     #[test]
     fn test_zero_collection_override_fails() {
-        for (field, json) in [
-            (
-                "max_record_payload_bytes",
-                r#"{"tabs":{"max_record_payload_bytes":0}}"#,
-            ),
-            ("max_post_bytes", r#"{"tabs":{"max_post_bytes":0}}"#),
-            ("max_request_bytes", r#"{"tabs":{"max_request_bytes":0}}"#),
-        ] {
-            temp_env::with_vars(
-                [
-                    (
-                        "SYNC_SYNCSTORAGE__DATABASE_URL",
-                        Some(TEST_SYNCSTORAGE_DATABASE_URL),
-                    ),
-                    ("SYNC_TOKENSERVER__DATABASE_URL", None),
-                    ("SYNC_TOKENSERVER__ENABLED", None),
-                    ("SYNC_SYNCSTORAGE__LIMITS__COLLECTIONS", Some(json)),
-                ],
-                || {
-                    let err = Settings::with_env_and_config_file(None)
-                        .expect_err("a zero override should fail");
-                    let msg = err.to_string();
-                    assert!(msg.contains(field), "error {msg:?} should mention {field}");
-                    assert!(msg.contains("must be greater than 0"));
-                },
-            );
-        }
-    }
-
-    #[test]
-    fn test_gcs_offload_bucket_on_non_spanner_fails() {
-        // The default test DATABASE_URL is mysql, which has no payload_link
-        // column, so a configured off-load bucket must fail validation.
         temp_env::with_vars(
             [
                 (
@@ -541,74 +462,14 @@ mod test {
                 ("SYNC_TOKENSERVER__DATABASE_URL", None),
                 ("SYNC_TOKENSERVER__ENABLED", None),
                 (
-                    "SYNC_SYNCSTORAGE__GCS_PAYLOAD_BUCKET",
-                    Some("sync-payloads"),
+                    "SYNC_SYNCSTORAGE__LIMITS__COLLECTIONS",
+                    Some(r#"{"tabs":{"max_record_payload_bytes":0}}"#),
                 ),
             ],
             || {
                 let err = Settings::with_env_and_config_file(None)
-                    .expect_err("an off-load bucket on a non-spanner backend should fail");
-                assert!(err.to_string().contains("Spanner backend"));
-            },
-        );
-    }
-
-    #[test]
-    fn test_gcs_offload_collections_on_non_spanner_fails() {
-        // Opting collections into off-load without a bucket must also fail on
-        // a non-spanner backend.
-        temp_env::with_vars(
-            [
-                (
-                    "SYNC_SYNCSTORAGE__DATABASE_URL",
-                    Some(TEST_SYNCSTORAGE_DATABASE_URL),
-                ),
-                ("SYNC_TOKENSERVER__DATABASE_URL", None),
-                ("SYNC_TOKENSERVER__ENABLED", None),
-                (
-                    "SYNC_SYNCSTORAGE__GCS_PAYLOAD_OFFLOAD_COLLECTIONS",
-                    Some("tabs,history"),
-                ),
-            ],
-            || {
-                let err = Settings::with_env_and_config_file(None)
-                    .expect_err("off-load collections on a non-spanner backend should fail");
-                assert!(err.to_string().contains("Spanner backend"));
-            },
-        );
-    }
-
-    #[test]
-    fn test_gcs_offload_on_spanner_validates() {
-        // The same off-load config validates against a spanner DATABASE_URL.
-        temp_env::with_vars(
-            [
-                (
-                    "SYNC_SYNCSTORAGE__DATABASE_URL",
-                    Some("spanner://projects/test/instances/test/databases/test"),
-                ),
-                ("SYNC_TOKENSERVER__DATABASE_URL", None),
-                ("SYNC_TOKENSERVER__ENABLED", None),
-                (
-                    "SYNC_SYNCSTORAGE__GCS_PAYLOAD_BUCKET",
-                    Some("sync-payloads"),
-                ),
-                (
-                    "SYNC_SYNCSTORAGE__GCS_PAYLOAD_OFFLOAD_COLLECTIONS",
-                    Some("tabs,history"),
-                ),
-            ],
-            || {
-                let settings = Settings::with_env_and_config_file(None)
-                    .expect("off-load config should validate on spanner");
-                assert_eq!(
-                    settings.syncstorage.gcs_payload_bucket.as_deref(),
-                    Some("sync-payloads")
-                );
-                assert_eq!(
-                    settings.syncstorage.gcs_payload_offload_collections,
-                    vec!["tabs".to_owned(), "history".to_owned()]
-                );
+                    .expect_err("a zero override should fail");
+                assert!(err.to_string().contains("must be greater than 0"));
             },
         );
     }

@@ -6,7 +6,6 @@ authors.workspace = true
 edition.workspace = true
 
 [dependencies]
-regex.workspace = true
 serde.workspace = true
 slog-scope.workspace = true
 

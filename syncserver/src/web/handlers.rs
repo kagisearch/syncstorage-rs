@@ -10,7 +10,6 @@ use actix_web::{
     http::{StatusCode, header},
     web::Data,
 };
-use futures::stream::{self, StreamExt, TryStreamExt};
 use serde::Serialize;
 use serde_json::{Value, json};
 use syncserver_common::{X_LAST_MODIFIED, X_WEAVE_NEXT_OFFSET, X_WEAVE_RECORDS};
@@ -26,11 +25,9 @@ use crate::{
     web::{
         extractors::{
             BsoPutRequest, BsoRequest, CollectionPostRequest, CollectionRequest, EmitApiMetric,
-            HeartbeatRequest, MetaRequest, ReplyFormat, TestErrorRequest,
+            HeartbeatRequest, MetaRequest, ReplyFormat, TestErrorRequest, JwtAuthData,
         },
-        payload_offload::{
-            delete_payload, download_payload, offload_bucket, reattach_by_index, upload_payload,
-        },
+        payload_offload::{download_payload, offload_bucket, upload_payload},
         transaction::DbTransactionPool,
     },
 };
@@ -54,14 +51,14 @@ pub const ONE_KB: f64 = 1024.0;
     )
 )]
 pub async fn get_collections(
-    meta: MetaRequest,
     db_pool: DbTransactionPool,
+    meta: JwtAuthData,
     request: HttpRequest,
     state: Data<ServerState>,
 ) -> Result<HttpResponse, ApiError> {
     db_pool
-        .transaction_http(&request, async |db| {
-            meta.emit_api_metric("request.get_collections");
+        .transaction_http(&request, &meta.user_id, async |user_id, db| {
+            //meta.emit_api_metric("request.get_collections");
             if state.glean_enabled {
                 // Values below are be passed to the Glean logic to emit metrics.
                 // This is used to measure DAU (Daily Active Use) of Sync.
@@ -79,14 +76,14 @@ pub async fn get_collections(
                     },
                     &EventsPing {
                         syncstorage_device_family: device_info.device_family.to_string(),
-                        syncstorage_hashed_device_id: meta.user_id.hashed_device_id.clone(),
-                        syncstorage_hashed_fxa_uid: meta.user_id.hashed_fxa_uid.clone(),
+                        syncstorage_hashed_device_id: user_id.hashed_device_id.clone(),
+                        syncstorage_hashed_fxa_uid: user_id.hashed_fxa_uid.clone(),
                         syncstorage_platform: device_info.platform.to_string(),
                         event: Some(Box::new(SyncstorageGetCollectionsEvent {})),
                     },
                 );
             }
-            let result = db.get_collection_timestamps(meta.user_id).await?;
+            let result = db.get_collection_timestamps(user_id.to_owned()).await?;
 
             Ok(HttpResponse::build(StatusCode::OK)
                 .insert_header((X_WEAVE_RECORDS, result.len().to_string()))
@@ -115,9 +112,9 @@ pub async fn get_collection_counts(
     request: HttpRequest,
 ) -> Result<HttpResponse, ApiError> {
     db_pool
-        .transaction_http(&request, async |db| {
+        .transaction_http(&request, &meta.user_id, async |user_id, db| {
             meta.emit_api_metric("request.get_collection_counts");
-            let result = db.get_collection_counts(meta.user_id).await?;
+            let result = db.get_collection_counts(user_id.to_owned()).await?;
 
             Ok(HttpResponse::build(StatusCode::OK)
                 .insert_header((X_WEAVE_RECORDS, result.len().to_string()))
@@ -146,10 +143,10 @@ pub async fn get_collection_usage(
     request: HttpRequest,
 ) -> Result<HttpResponse, ApiError> {
     db_pool
-        .transaction_http(&request, async |db| {
+        .transaction_http(&request, &meta.user_id, async |user_id, db| {
             meta.emit_api_metric("request.get_collection_usage");
             let usage: HashMap<_, _> = db
-                .get_collection_usage(meta.user_id)
+                .get_collection_usage(user_id.to_owned())
                 .await?
                 .into_iter()
                 .map(|(coll, size)| (coll, size as f64 / ONE_KB))
@@ -182,9 +179,9 @@ pub async fn get_quota(
     request: HttpRequest,
 ) -> Result<HttpResponse, ApiError> {
     db_pool
-        .transaction_http(&request, async |db| {
+        .transaction_http(&request, &meta.user_id, async |user_id, db| {
             meta.emit_api_metric("request.get_quota");
-            let usage = db.get_storage_usage(meta.user_id).await?;
+            let usage = db.get_storage_usage(user_id.to_owned()).await?;
             Ok(HttpResponse::Ok().json(vec![Some(usage as f64 / ONE_KB), None]))
         })
         .await
@@ -210,9 +207,9 @@ pub async fn delete_all(
     request: HttpRequest,
 ) -> Result<HttpResponse, ApiError> {
     db_pool
-        .transaction_http(&request, async |db| {
+        .transaction_http(&request, &meta.user_id, async |user_id, db| {
             meta.emit_api_metric("request.delete_all");
-            Ok(HttpResponse::Ok().json(db.delete_storage(meta.user_id).await?))
+            Ok(HttpResponse::Ok().json(db.delete_storage(user_id.to_owned()).await?))
         })
         .await
 }
@@ -234,25 +231,26 @@ pub async fn delete_all(
     )
 )]
 pub async fn delete_collection(
+    meta: MetaRequest,
     coll: CollectionRequest,
     db_pool: DbTransactionPool,
     request: HttpRequest,
 ) -> Result<HttpResponse, ApiError> {
     db_pool
-        .transaction_http(&request, async |db| {
+        .transaction_http(&request, &meta.user_id, async |user_id,db| {
             let delete_bsos = !coll.query.ids.is_empty();
             let timestamp = if delete_bsos {
-                coll.emit_api_metric("request.delete_bsos");
+                meta.emit_api_metric("request.delete_bsos");
                 db.delete_bsos(params::DeleteBsos {
-                    user_id: coll.user_id.clone(),
+                    user_id: user_id.clone(),
                     collection: coll.collection.clone(),
                     ids: coll.query.ids.clone(),
                 })
                 .await
             } else {
-                coll.emit_api_metric("request.delete_collection");
+                meta.emit_api_metric("request.delete_collection");
                 db.delete_collection(params::DeleteCollection {
-                    user_id: coll.user_id.clone(),
+                    user_id: user_id.clone(),
                     collection: coll.collection.clone(),
                 })
                 .await
@@ -262,7 +260,7 @@ pub async fn delete_collection(
                 Ok(timestamp) => timestamp,
                 Err(e) => {
                     if e.is_collection_not_found() || e.is_bso_not_found() {
-                        db.get_storage_timestamp(coll.user_id).await?
+                        db.get_storage_timestamp(user_id.to_owned()).await?
                     } else {
                         return Err(e.into());
                     }
@@ -302,13 +300,14 @@ pub async fn delete_collection(
     )
 )]
 pub async fn get_collection(
+    meta: JwtAuthData,
     coll: CollectionRequest,
     db_pool: DbTransactionPool,
     state: Data<ServerState>,
     request: HttpRequest,
 ) -> Result<HttpResponse, ApiError> {
     let params = params::GetBsos {
-        user_id: coll.user_id.clone(),
+        user_id: meta.user_id.clone(),
         newer: coll.query.newer,
         older: coll.query.older,
         sort: coll.query.sort,
@@ -321,8 +320,8 @@ pub async fn get_collection(
 
     if !coll.query.full {
         return db_pool
-            .transaction_http(&request, async |db| {
-                coll.emit_api_metric("request.get_collection");
+            .transaction_http(&request, &meta.user_id, async |_user_id, db| {
+                meta.emit_api_metric("request.get_collection");
                 // Changed to be a Paginated list of BSOs, need to extract IDs from them.
                 let ids = handle_not_found(db.get_bso_ids(params).await)?;
                 Ok(finish_get_collection(&coll, ids).await)
@@ -335,32 +334,16 @@ pub async fn get_collection(
     db_pool
         .transaction_http_then(
             &request,
+            &meta.user_id,
             async |db| {
-                coll.emit_api_metric("request.get_collection");
+                meta.emit_api_metric("request.get_collection");
                 handle_not_found(db.get_bsos(params).await).map_err(Into::into)
             },
             async |mut bsos: Paginated<results::GetBso>| {
-                let links: Vec<(usize, String)> = bsos
-                    .items
-                    .iter_mut()
-                    .enumerate()
-                    .filter_map(|(i, bso)| bso.payload_link.take().map(|link| (i, link)))
-                    .collect();
-
-                if !links.is_empty() {
-                    let client = state.gcs_client()?;
-                    let payloads: Vec<(usize, String)> = stream::iter(links)
-                        .map(|(i, link)| {
-                            let client = client.clone();
-                            async move { download_payload(&client, &link).await.map(|p| (i, p)) }
-                        })
-                        .buffer_unordered(state.gcs_payload_max_concurrency.get())
-                        .try_collect()
-                        .await?;
-
-                    reattach_by_index(&mut bsos.items, payloads, |bso, payload| {
-                        bso.payload = payload
-                    });
+                for bso in bsos.items.iter_mut() {
+                    if let Some(link) = bso.payload_link.take() {
+                        bso.payload = download_payload(&state, &link).await?;
+                    }
                 }
                 Ok(finish_get_collection(&coll, bsos).await)
             },
@@ -427,6 +410,7 @@ where
     )
 )]
 pub async fn post_collection(
+    meta: JwtAuthData,
     mut coll: CollectionPostRequest,
     db_pool: DbTransactionPool,
     state: Data<ServerState>,
@@ -440,48 +424,29 @@ pub async fn post_collection(
     // This also covers the batched path: post_collection_batch reads from
     // `coll.bsos.valid` once the transaction is open, by which point each
     // entry's payload/payload_link have already been swapped.
-    let mut offload_urls: Vec<String> = Vec::new();
     if let Some(bucket) = offload_bucket(&state, &coll.collection) {
-        let client = state.gcs_client()?;
-        // Take the payloads for concurrent uploads, with index to bind the payload url back to
-        // the bso
-        let pending: Vec<(usize, String, String)> = coll
-            .bsos
-            .valid
-            .iter_mut()
-            .enumerate()
-            .filter_map(|(i, bso)| bso.payload.take().map(|p| (i, bso.id.clone(), p)))
-            .collect();
-
-        let user_id = &coll.user_id;
-        let collection = coll.collection.as_str();
-        // fail-fast on first failure uploads; successful, orphaned uploads rely on GCS lifecyle
-        // policy for clean-up.
-        let uploads: Vec<(usize, String)> = stream::iter(pending)
-            .map(|(i, bso_id, payload)| {
-                let client = client.clone();
-                async move {
-                    upload_payload(&client, bucket, user_id, collection, &bso_id, payload)
-                        .await
-                        .map(|url| (i, url))
-                }
-            })
-            .buffer_unordered(state.gcs_payload_max_concurrency.get())
-            .try_collect()
-            .await?;
-
-        // Track uploaded URLs so they can be cleaned up from GCS if the DB
-        // transaction below fails.
-        offload_urls.extend(uploads.iter().map(|(_, url)| url.clone()));
-
-        reattach_by_index(&mut coll.bsos.valid, uploads, |bso, url| {
-            bso.payload_link = Some(url)
-        });
+        for bso in coll.bsos.valid.iter_mut() {
+            if let Some(payload) = bso.payload.take() {
+                let url = upload_payload(
+                    &state,
+                    bucket,
+                    &meta.user_id,
+                    &coll.collection,
+                    &bso.id,
+                    payload,
+                )
+                .await?;
+                // payload was taken above; leave it None so only
+                // payload_link is set on the offloaded BSO.
+                bso.payload_link = Some(url);
+            }
+        }
     }
 
-    let resp = db_pool
-        .transaction_http(&request, async |db| {
-            coll.emit_api_metric("request.post_collection");
+    let user_id = meta.user_id.to_owned(); 
+    db_pool
+        .transaction_http(&request, &user_id, async |user_id, db| {
+            meta.emit_api_metric("request.post_collection");
             trace!("Collection: Post");
 
             // batches are a conceptual, singular update, so we should handle
@@ -492,7 +457,7 @@ pub async fn post_collection(
                 // simpler post_bsos call. Fallthrough in that case, instead of
                 // incurring post_collection_batch's overhead
                 if !(batch.id.is_none() && batch.commit) {
-                    return post_collection_batch(coll, db).await;
+                    return post_collection_batch(meta, coll, db).await;
                 }
             }
 
@@ -505,7 +470,7 @@ pub async fn post_collection(
 
             let modified = db
                 .post_bsos(params::PostBsos {
-                    user_id: coll.user_id,
+                    user_id: user_id.clone(),
                     collection: coll.collection,
                     bsos,
                     for_batch: false,
@@ -520,27 +485,17 @@ pub async fn post_collection(
                     "failed": coll.bsos.invalid,
                 })))
         })
-        .await;
-
-    if resp.is_err()
-        && !offload_urls.is_empty()
-        && let Ok(client) = state.gcs_control_client()
-    {
-        for url in offload_urls {
-            let _ = delete_payload(client, &url).await;
-        }
-    }
-
-    resp
+        .await
 }
 
 // Append additional collection items into the given Batch, optionally commiting
 // the entire, accumulated if the `commit` flag is set.
 pub async fn post_collection_batch(
+    meta: JwtAuthData,
     coll: CollectionPostRequest,
     db: &mut dyn Db<Error = DbError>,
 ) -> Result<HttpResponse, ApiError> {
-    coll.emit_api_metric("request.post_collection_batch");
+    meta.emit_api_metric("request.post_collection_batch");
     trace!("Batch: Post collection batch");
     // Bail early if we have nonsensical arguments
     // TODO: issue932 may make these multi-level transforms easier
@@ -554,7 +509,7 @@ pub async fn post_collection_batch(
         // Validate the batch before attempting a full append (for efficiency)
         let is_valid = db
             .validate_batch(params::ValidateBatch {
-                user_id: coll.user_id.clone(),
+                user_id: meta.user_id.clone(),
                 collection: coll.collection.clone(),
                 id: id.clone(),
             })
@@ -563,7 +518,7 @@ pub async fn post_collection_batch(
         if is_valid {
             let usage = db
                 .get_quota_usage(params::GetQuotaUsage {
-                    user_id: coll.user_id.clone(),
+                    user_id: meta.user_id.clone(),
                     collection: coll.collection.clone(),
                 })
                 .await?;
@@ -581,14 +536,14 @@ pub async fn post_collection_batch(
     } else {
         trace!("Batch: Creating new batch");
         db.create_batch(params::CreateBatch {
-            user_id: coll.user_id.clone(),
+            user_id: meta.user_id.clone(),
             collection: coll.collection.clone(),
             bsos: vec![],
         })
         .await?
     };
 
-    let user_id = coll.user_id.clone();
+    let user_id = meta.user_id.clone();
     let collection = coll.collection.clone();
 
     let mut success = vec![];
@@ -621,8 +576,8 @@ pub async fn post_collection_batch(
             let result = {
                 trace!("Batch: Appending to {}", &new_batch.id);
                 db.append_to_batch(params::AppendToBatch {
-                    user_id: coll.user_id.clone(),
-                    collection: coll.collection.clone(),
+                    user_id: user_id.clone(),
+                    collection: collection.clone(),
                     batch: new_batch.clone(),
                     bsos: coll.bsos.valid.into_iter().map(From::from).collect(),
                 })
@@ -674,8 +629,8 @@ pub async fn post_collection_batch(
         trace!("Batch: writing commit message bsos");
         let result = db
             .post_bsos(params::PostBsos {
-                user_id: coll.user_id.clone(),
-                collection: coll.collection.clone(),
+                user_id: user_id.clone(),
+                collection: collection.clone(),
                 bsos: coll
                     .bsos
                     .valid
@@ -724,16 +679,17 @@ pub async fn post_collection_batch(
     )
 )]
 pub async fn delete_bso(
+    meta: JwtAuthData,
     bso_req: BsoRequest,
     db_pool: DbTransactionPool,
     request: HttpRequest,
 ) -> Result<HttpResponse, ApiError> {
     db_pool
-        .transaction_http(&request, async |db| {
-            bso_req.emit_api_metric("request.delete_bso");
+        .transaction_http(&request, &meta.user_id, async |user_id, db| {
+            meta.emit_api_metric("request.delete_bso");
             let result = db
                 .delete_bso(params::DeleteBso {
-                    user_id: bso_req.user_id,
+                    user_id: user_id.clone(),
                     collection: bso_req.collection,
                     id: bso_req.bso,
                 })
@@ -761,6 +717,7 @@ pub async fn delete_bso(
     )
 )]
 pub async fn get_bso(
+    meta: JwtAuthData,
     bso_req: BsoRequest,
     db_pool: DbTransactionPool,
     state: Data<ServerState>,
@@ -768,11 +725,11 @@ pub async fn get_bso(
 ) -> Result<HttpResponse, ApiError> {
     db_pool
         .transaction_http_then(
-            &request,
+            &request, &meta.user_id,
             async |db| {
-                bso_req.emit_api_metric("request.get_bso");
+                meta.emit_api_metric("request.get_bso");
                 db.get_bso(params::GetBso {
-                    user_id: bso_req.user_id,
+                    user_id: meta.user_id.clone(),
                     collection: bso_req.collection,
                     id: bso_req.bso,
                 })
@@ -783,7 +740,7 @@ pub async fn get_bso(
                 if let Some(ref mut bso) = maybe_bso
                     && let Some(link) = bso.payload_link.take()
                 {
-                    bso.payload = download_payload(state.gcs_client()?, &link).await?;
+                    bso.payload = download_payload(&state, &link).await?;
                 }
                 Ok(maybe_bso.map_or_else(
                     || HttpResponse::NotFound().finish(),
@@ -812,6 +769,7 @@ pub async fn get_bso(
     )
 )]
 pub async fn put_bso(
+    meta: JwtAuthData,
     mut bso_req: BsoPutRequest,
     db_pool: DbTransactionPool,
     state: Data<ServerState>,
@@ -822,7 +780,7 @@ pub async fn put_bso(
         && let Some(payload) = bso_req.body.payload.take()
     {
         let url = upload_payload(
-            state.gcs_client()?,
+            &state,
             bucket,
             &bso_req.user_id,
             &bso_req.collection,
@@ -834,17 +792,17 @@ pub async fn put_bso(
         payload_link = Some(url);
     }
 
-    let resp = db_pool
-        .transaction_http(&request, async |db| {
-            bso_req.emit_api_metric("request.put_bso");
+    db_pool
+        .transaction_http(&request, &meta.user_id, async |user_id, db| {
+            meta.emit_api_metric("request.put_bso");
             let result = db
                 .put_bso(params::PutBso {
-                    user_id: bso_req.user_id,
+                    user_id: user_id.to_owned(),
                     collection: bso_req.collection,
                     id: bso_req.bso,
                     sortindex: bso_req.body.sortindex,
                     payload: bso_req.body.payload,
-                    payload_link: payload_link.clone(),
+                    payload_link,
                     ttl: bso_req.body.ttl,
                 })
                 .await?;
@@ -853,15 +811,7 @@ pub async fn put_bso(
                 .insert_header((X_LAST_MODIFIED, result.as_header()))
                 .json(result))
         })
-        .await;
-
-    if resp.is_err()
-        && let Some(gcs_url) = &payload_link
-        && let Ok(client) = state.gcs_control_client()
-    {
-        let _ = delete_payload(client, gcs_url).await;
-    }
-    resp
+        .await
 }
 
 #[utoipa::path(

@@ -27,7 +27,7 @@ pub struct ServerState {
     pub db_pool: Box<dyn DbPool>,
     pub fxa_email_domain: String,
     pub fxa_metrics_hash_secret: String,
-    pub oauth_verifier: Box<dyn VerifyToken<Output = oauth::VerifyOutput>>,
+    pub oauth_verifier: Box<dyn VerifyToken<JWTVerifierImpl, Output = oauth::VerifyOutput>>,
     pub node_capacity_release_rate: Option<f32>,
     pub node_type: NodeType,
     pub metrics: Arc<StatsdClient>,
@@ -35,7 +35,6 @@ pub struct ServerState {
     pub set_verifiers: Vec<SETVerifierImpl>,
     pub fxa_webhook_enabled: bool,
     pub fxa_webhook_metrics_only: bool,
-    pub allow_new_users: bool,
 }
 
 impl ServerState {
@@ -64,7 +63,7 @@ impl ServerState {
                 );
             }
             Box::new(
-                oauth::Verifier::new(settings, jwk_verifiers)
+                oauth::Verifier::new(jwk_verifiers)
                     .expect("failed to create Tokenserver OAuth verifier"),
             )
         };
@@ -113,7 +112,6 @@ impl ServerState {
             set_verifiers,
             fxa_webhook_enabled: settings.fxa_webhook_enabled,
             fxa_webhook_metrics_only: settings.fxa_webhook_metrics_only,
-            allow_new_users: settings.allow_new_users,
         })
     }
 

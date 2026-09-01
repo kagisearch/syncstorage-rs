@@ -313,7 +313,7 @@ impl Db for SpannerDb {
         };
         let mut streaming = self
             .sql(
-                "SELECT collection_id, COALESCE(SUM(BYTE_LENGTH(payload)), 0)
+                "SELECT collection_id, SUM(BYTE_LENGTH(payload))
                    FROM bsos
                   WHERE fxa_uid = @fxa_uid
                     AND fxa_kid = @fxa_kid
@@ -380,7 +380,7 @@ impl Db for SpannerDb {
         };
         let result = self
             .sql(
-                "SELECT COALESCE(SUM(BYTE_LENGTH(payload)), 0)
+                "SELECT SUM(BYTE_LENGTH(payload))
                    FROM bsos
                   WHERE fxa_uid = @fxa_uid
                     AND fxa_kid = @fxa_kid

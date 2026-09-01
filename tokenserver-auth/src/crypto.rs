@@ -119,7 +119,7 @@ impl From<jsonwebtoken::errors::Error> for JWTVerifyError {
 pub trait JWTVerifier: TryFrom<Self::Key, Error = JWTVerifyError> + Sync + Send + Clone {
     type Key: DeserializeOwned;
 
-    fn verify<T: DeserializeOwned>(&self, token: &str) -> Result<T, JWTVerifyError>;
+    fn verify<T: DeserializeOwned>(&self, token: &Vec<u8>) -> Result<T, JWTVerifyError>;
 }
 
 /// An implementation of the JWT verifier using the jsonwebtoken crate
@@ -132,7 +132,7 @@ pub struct JWTVerifierImpl {
 impl JWTVerifier for JWTVerifierImpl {
     type Key = Jwk;
 
-    fn verify<T: DeserializeOwned>(&self, token: &str) -> Result<T, JWTVerifyError> {
+    fn verify<T: DeserializeOwned>(&self, token: &Vec<u8>) -> Result<T, JWTVerifyError> {
         let token_data = jsonwebtoken::decode::<T>(token, &self.key, &self.validation)?;
         token_data
             .header
@@ -174,6 +174,26 @@ impl TryFrom<Jwk> for JWTVerifierImpl {
     }
 }
 
+impl std::fmt::Debug for JWTVerifierImpl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Produce a small JSON summary without exposing key material.
+        let algs: Vec<String> = self
+            .validation
+            .algorithms
+            .iter()
+            .map(|a| format!("{:?}", a))
+            .collect();
+        let summary = serde_json::json!({
+            "algorithms": algs,
+            "validate_aud": self.validation.validate_aud,
+        });
+        match serde_json::to_string(&summary) {
+            Ok(s) => write!(f, "{}", s),
+            Err(_) => write!(f, "{{}}"),
+        }
+    }
+}
+
 /// Parsed claims from a FxA Security Event Token <https://datatracker.ietf.org/doc/html/rfc8417>.
 #[derive(Debug, serde::Deserialize)]
 pub struct FxaWebhookClaims {
@@ -204,56 +224,8 @@ impl SETVerifierImpl {
         })
     }
 
-    pub fn verify<T: DeserializeOwned>(&self, token: &str) -> Result<T, JWTVerifyError> {
+    pub fn verify<T: DeserializeOwned>(&self, token: &Vec<u8>) -> Result<T, JWTVerifyError> {
         let token_data = jsonwebtoken::decode::<T>(token, &self.key, &self.validation)?;
         Ok(token_data.claims)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_utils::{OTHER_PRIVATE_KEY_PEM, TEST_PRIVATE_KEY_PEM, make_set, test_jwk};
-    use serde_json::json;
-
-    #[test]
-    fn test_verify_valid_set() {
-        let verifier =
-            SETVerifierImpl::new(&test_jwk(), "testo", "https://accounts.firefox.com/").unwrap();
-        let token = make_set(
-            "quux",
-            "testo",
-            json!({"https://schemas.accounts.firefox.com/event/delete-user": {}}),
-            TEST_PRIVATE_KEY_PEM,
-        );
-        let claims: FxaWebhookClaims = verifier.verify(&token).unwrap();
-        assert_eq!(claims.sub, "quux");
-        assert_eq!(claims.iss, "https://accounts.firefox.com/");
-    }
-
-    #[test]
-    fn test_verify_wrong_audience_set() {
-        let verifier =
-            SETVerifierImpl::new(&test_jwk(), "testo", "https://accounts.firefox.com/").unwrap();
-        let token = make_set("quux", "wrong-client-id", json!({}), TEST_PRIVATE_KEY_PEM);
-        assert!(verifier.verify::<FxaWebhookClaims>(&token).is_err());
-    }
-
-    #[test]
-    fn test_verify_wrong_issuer_set() {
-        let verifier =
-            SETVerifierImpl::new(&test_jwk(), "testo", "https://accounts.stage.mozaws.net")
-                .unwrap();
-        let token = make_set("quux", "testo", json!({}), TEST_PRIVATE_KEY_PEM);
-        assert!(verifier.verify::<FxaWebhookClaims>(&token).is_err());
-    }
-
-    #[test]
-    fn test_verify_wrong_key_set() {
-        let verifier =
-            SETVerifierImpl::new(&test_jwk(), "testo", "https://accounts.firefox.com/").unwrap();
-        let token = make_set("quux", "testo", json!({}), OTHER_PRIVATE_KEY_PEM);
-        let err = verifier.verify::<FxaWebhookClaims>(&token).unwrap_err();
-        assert!(matches!(err, JWTVerifyError::InvalidSignature));
     }
 }

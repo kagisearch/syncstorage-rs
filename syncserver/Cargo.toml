@@ -36,6 +36,7 @@ hmac.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 
+reqwest = { workspace = true, features = ["json"] }
 actix-http = "3"
 actix-rt = "2"
 actix-cors = "0.7"
@@ -64,7 +65,6 @@ validator_derive = "0.20"
 woothee = "0.13"
 
 [dev-dependencies]
-google-cloud-gax = "1.11"
 httptest = "0.16"
 temp-env.workspace = true
 tokenserver-auth = { path = "../tokenserver-auth", features = ["test-support"] }
@@ -73,8 +73,9 @@ tokenserver-auth = { path = "../tokenserver-auth", features = ["test-support"] }
 slog-journald = "2.2.0"
 
 [features]
-default = ["mysql", "py_verifier"]
+default = ["mysql"]
 no_auth = []
+sentry = []
 py_verifier = ["tokenserver-auth/py", "tokenserver-common/py"]
 mysql = ["syncstorage-db/mysql"]
 postgres = ["syncstorage-db/postgres"]

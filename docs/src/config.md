@@ -73,7 +73,7 @@ The following configuration options are available.
 | <span id="SYNC_SYNCSTORAGE__LIMITS__MAX_TOTAL_BYTES"></span>SYNC_SYNCSTORAGE__LIMITS__MAX_TOTAL_BYTES | 262,144,000 | Max BSO payload size per batch |
 | <span id="SYNC_SYNCSTORAGE__LIMITS__MAX_TOTAL_RECORDS"></span>SYNC_SYNCSTORAGE__LIMITS__MAX_TOTAL_RECORDS | 10,000 | Max BSO count per batch |
 | <span id="SYNC_SYNCSTORAGE__LIMITS__MAX_QUOTA_LIMIT"></span>SYNC_SYNCSTORAGE__LIMITS__MAX_QUOTA_LIMIT | 2,147,483,648 | Max storage quota per user (2 GB) |
-| <span id="SYNC_SYNCSTORAGE__LIMITS__COLLECTIONS"></span>SYNC_SYNCSTORAGE__LIMITS__COLLECTIONS | unset | Optional per-collection limit overrides, as a JSON object mapping collection name -> limits object (e.g. `{"newtab-images":{"max_record_payload_bytes":20971520,"max_post_bytes":26214400,"max_request_bytes":26218496}}`). Supported override fields: `max_record_payload_bytes`, `max_post_bytes`, `max_request_bytes`. Any field left unset inherits the corresponding global limit. |
+| <span id="SYNC_SYNCSTORAGE__LIMITS__COLLECTIONS"></span>SYNC_SYNCSTORAGE__LIMITS__COLLECTIONS | unset | Optional per-collection limit overrides, as a JSON object mapping collection name -> limits object (e.g. `{"tabs":{"max_record_payload_bytes":202020}}`). Only `max_record_payload_bytes` is supported currently. |
 
 ### Syncstorage Features
 
@@ -86,19 +86,6 @@ The following configuration options are available.
 | <span id="SYNC_SYNCSTORAGE__LBHEARTBEAT_TTL"></span>SYNC_SYNCSTORAGE__LBHEARTBEAT_TTL | None | Load balancer heartbeat period in seconds |
 | <span id="SYNC_SYNCSTORAGE__LBHEARTBEAT_TTL_JITTER"></span>SYNC_SYNCSTORAGE__LBHEARTBEAT_TTL_JITTER | 25 | Jitter percentage for the load balancer heartbeat period |
 | <span id="SYNC_SYNCSTORAGE__STATSD_LABEL"></span>SYNC_SYNCSTORAGE__STATSD_LABEL | syncstorage | StatsD metrics label prefix |
-
-### Syncstorage Payload Off-load
-
-Off-loads large BSO payloads to a Google Cloud Storage bucket, storing the
-object URL in the `payload_link` column instead of the inline `payload`
-column. Supported on the Spanner backend only: setting either variable on a
-mysql or postgres backend fails startup, since those backends have no
-`payload_link` column and would silently drop the payload.
-
-| Env Var | Default Value | Description |
-| --- | --- | --- |
-| <span id="SYNC_SYNCSTORAGE__GCS_PAYLOAD_BUCKET"></span>SYNC_SYNCSTORAGE__GCS_PAYLOAD_BUCKET | unset | GCS bucket for off-loaded payloads. Unset disables off-load. |
-| <span id="SYNC_SYNCSTORAGE__GCS_PAYLOAD_OFFLOAD_COLLECTIONS"></span>SYNC_SYNCSTORAGE__GCS_PAYLOAD_OFFLOAD_COLLECTIONS | unset | Comma-separated collection names whose payloads are off-loaded. Empty disables off-load for all collections. |
 
 ### Tokenserver Database
 
@@ -123,7 +110,6 @@ mysql or postgres backend fails startup, since those backends have no
 | <span id="SYNC_TOKENSERVER__FXA_WEBHOOK_METRICS_ONLY"></span>SYNC_TOKENSERVER__FXA_WEBHOOK_METRICS_ONLY | false | Run the FxA webhook handler in metrics-only mode. Received events are counted but not processed. Only used if `FXA_WEBHOOK_ENABLED` is true. |
 | <span id="SYNC_TOKENSERVER__FXA_WEBHOOK_SET_CLIENT_ID"></span>SYNC_TOKENSERVER__FXA_WEBHOOK_SET_CLIENT_ID | None | Expected `aud` of FxA Security Event Tokens. Required for account event webhooks. |
 | <span id="SYNC_TOKENSERVER__FXA_WEBHOOK_SET_ISSUER"></span>SYNC_TOKENSERVER__FXA_WEBHOOK_SET_ISSUER | None | Expected `iss` of FxA Security Event Tokens. Required for account event webhooks. |
-| <span id="SYNC_TOKENSERVER__ALLOW_NEW_USERS"></span>SYNC_TOKENSERVER__ALLOW_NEW_USERS | true | Whether new users may be created. When disabled, only previously registered users can use the tokenserver service. |
 
 ### Tokenserver+FxA Integration
 

@@ -2,11 +2,9 @@ use actix_web::{Error, FromRequest, HttpRequest, dev::Payload};
 use futures::future::{FutureExt, LocalBoxFuture};
 
 use syncserver_common::Metrics;
-use syncstorage_db::UserIdentifier;
-use tokenserver_auth::TokenserverOrigin;
 
 use super::{
-    ACCEPTED_CONTENT_TYPES, BsoQueryParams, CollectionParam, HawkIdentifier, RequestErrorLocation,
+    ACCEPTED_CONTENT_TYPES, BsoQueryParams, CollectionParam, RequestErrorLocation,
     get_accepted,
 };
 use crate::{server::MetricsWrapper, web::error::ValidationErrorKind};
@@ -23,8 +21,6 @@ pub enum ReplyFormat {
 /// Extracts/validates information needed for collection delete/get requests.
 pub struct CollectionRequest {
     pub collection: String,
-    pub user_id: UserIdentifier,
-    pub tokenserver_origin: TokenserverOrigin,
     pub query: BsoQueryParams,
     pub reply: ReplyFormat,
     pub metrics: Metrics,
@@ -38,8 +34,8 @@ impl FromRequest for CollectionRequest {
         let req = req.clone();
         let mut payload = Payload::None;
         async move {
-            let (user_id, query, collection) =
-                <(HawkIdentifier, BsoQueryParams, CollectionParam)>::from_request(
+            let (query, collection) =
+                <(BsoQueryParams, CollectionParam)>::from_request(
                     &req,
                     &mut payload,
                 )
@@ -63,8 +59,6 @@ impl FromRequest for CollectionRequest {
 
             Ok(CollectionRequest {
                 collection,
-                tokenserver_origin: user_id.tokenserver_origin,
-                user_id: user_id.into(),
                 query,
                 reply,
                 metrics: MetricsWrapper::extract(&req).await?.0,
@@ -113,7 +107,6 @@ mod tests {
         req.extensions_mut().insert(make_db());
         let result = block_on(CollectionRequest::extract(&req))
             .expect("Could not get result in test_valid_collection_request");
-        assert_eq!(result.user_id.legacy_id, *USER_ID);
         assert_eq!(&result.collection, "tabs");
     }
 

@@ -409,7 +409,7 @@ mod tests {
     use utoipa::OpenApi;
     use utoipa_swagger_ui::SwaggerUi;
 
-    use syncserver_common::middleware::sentry::SentryWrapper;
+    //use syncserver_common::middleware::sentry::SentryWrapper;
     use syncserver_settings::Settings;
     use tokenserver_auth::test_utils::{
         OTHER_PRIVATE_KEY_PEM, TEST_PRIVATE_KEY_PEM, make_set, test_jwk,
@@ -462,7 +462,6 @@ mod tests {
             set_verifiers,
             fxa_webhook_enabled: true,
             fxa_webhook_metrics_only: false,
-            allow_new_users: true,
         }
     }
 
@@ -474,7 +473,6 @@ mod tests {
         Error = actix_web::Error,
     > {
         let secrets = Arc::new(syncserver_settings::Secrets::new("secret").unwrap());
-        let metrics = state.metrics.clone();
         test::init_service(build_app_without_syncstorage!(
             state,
             secrets,

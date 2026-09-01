@@ -21,37 +21,6 @@ use crate::error::{ApiError, WeaveError};
 
 use thiserror::Error;
 
-/// An error occurred during HAWK authentication.
-#[derive(Debug)]
-pub struct HawkError {
-    kind: HawkErrorKind,
-}
-
-impl HawkError {
-    pub fn kind(&self) -> &HawkErrorKind {
-        &self.kind
-    }
-
-    pub fn metric_label(&self) -> Option<&'static str> {
-        Some(match self.kind() {
-            HawkErrorKind::Base64(_) => "request.error.hawk.decode_error",
-            HawkErrorKind::Expired => "request.error.hawk.expired",
-            HawkErrorKind::Header(_) => "request.error.hawk.header",
-            HawkErrorKind::Hmac(_) => "request.error.hawk.hmac",
-            HawkErrorKind::InvalidHeader => "request.error.hawk.invalid_header",
-            HawkErrorKind::InvalidKeyLength(_) => "request.error.hawk.expired",
-            HawkErrorKind::Json(_) => "request.error.hawk.invalid_json",
-            HawkErrorKind::MissingHeader => "request.error.hawk.missing_header",
-            HawkErrorKind::MissingId => "request.error.hawk.missing_id",
-            HawkErrorKind::MissingPrefix => "request.error.hawk.missing_prefix",
-            HawkErrorKind::Parse(_) => "request.error.hawk.parse_error",
-            HawkErrorKind::TruncatedId => "request.error.hawk.id_too_short",
-            _ => return None,
-        })
-    }
-}
-
-/// Causes of HAWK errors.
 #[derive(Debug, Error)]
 pub enum HawkErrorKind {
     #[error("{}", _0)]
@@ -92,6 +61,108 @@ pub enum HawkErrorKind {
 
     #[error("id property is too short")]
     TruncatedId,
+}
+
+/// An error occurred during HAWK authentication.
+#[derive(Debug)]
+pub struct HawkError {
+    kind: HawkErrorKind,
+}
+
+impl HawkError {
+    pub fn kind(&self) -> &HawkErrorKind {
+        &self.kind
+    }
+
+    pub fn metric_label(&self) -> Option<&'static str> {
+        Some(match self.kind() {
+            HawkErrorKind::Base64(_) => "request.error.hawk.decode_error",
+            HawkErrorKind::Expired => "request.error.hawk.expired",
+            HawkErrorKind::Header(_) => "request.error.hawk.header",
+            HawkErrorKind::Hmac(_) => "request.error.hawk.hmac",
+            HawkErrorKind::InvalidHeader => "request.error.hawk.invalid_header",
+            HawkErrorKind::InvalidKeyLength(_) => "request.error.hawk.expired",
+            HawkErrorKind::Json(_) => "request.error.hawk.invalid_json",
+            HawkErrorKind::MissingHeader => "request.error.hawk.missing_header",
+            HawkErrorKind::MissingId => "request.error.hawk.missing_id",
+            HawkErrorKind::MissingPrefix => "request.error.hawk.missing_prefix",
+            HawkErrorKind::Parse(_) => "request.error.hawk.parse_error",
+            HawkErrorKind::TruncatedId => "request.error.hawk.id_too_short",
+            _ => return None,
+        })
+    }
+}
+
+/// Causes of JWT errors.
+#[derive(Debug, Error)]
+pub enum JwtErrorKind {
+    #[error("{}", _0)]
+    Base64(DecodeError),
+
+    #[error("expired payload")]
+    Expired,
+
+    #[error("{}", _0)]
+    Header(ToStrError),
+
+    #[error("{}", _0)]
+    Hmac(MacError),
+
+    #[error("validation failed")]
+    InvalidHeader,
+
+    #[error("{}", _0)]
+    InvalidKeyLength(InvalidLength),
+
+    #[error("{}", _0)]
+    Json(JsonError),
+
+    #[error("missing header")]
+    MissingHeader,
+
+    #[error("missing id property")]
+    MissingId,
+
+    #[error("missing path")]
+    MissingPath,
+
+    #[error("missing \"Hawk \" prefix")]
+    MissingPrefix,
+
+    #[error("{}", _0)]
+    Parse(ParseError),
+
+    #[error("id property is too short")]
+    TruncatedId,
+}
+
+#[derive(Debug)]
+pub struct JwtError {
+    kind: JwtErrorKind,
+}
+
+impl JwtError {
+    pub fn kind(&self) -> &JwtErrorKind {
+        &self.kind
+    }
+
+    pub fn metric_label(&self) -> Option<&'static str> {
+        Some(match self.kind() {
+            JwtErrorKind::Base64(_) => "request.error.jwt.decode_error",
+            JwtErrorKind::Expired => "request.error.jwt.expired",
+            JwtErrorKind::Header(_) => "request.error.jwt.header",
+            JwtErrorKind::Hmac(_) => "request.error.jwt.hmac",
+            JwtErrorKind::InvalidHeader => "request.error.jwt.invalid_header",
+            JwtErrorKind::InvalidKeyLength(_) => "request.error.jwt.expired",
+            JwtErrorKind::Json(_) => "request.error.jwt.invalid_json",
+            JwtErrorKind::MissingHeader => "request.error.jwt.missing_header",
+            JwtErrorKind::MissingId => "request.error.jwt.missing_id",
+            JwtErrorKind::MissingPrefix => "request.error.jwt.missing_prefix",
+            JwtErrorKind::Parse(_) => "request.error.jwt.parse_error",
+            JwtErrorKind::TruncatedId => "request.error.jwt.id_too_short",
+            _ => return None,
+        })
+    }
 }
 
 /// An error occurred in an Actix extractor.
@@ -156,6 +227,7 @@ pub enum ValidationErrorKind {
 }
 
 impl_fmt_display!(HawkError, HawkErrorKind);
+impl_fmt_display!(JwtError, JwtErrorKind);
 impl_fmt_display!(ValidationError, ValidationErrorKind);
 
 from_error!(DecodeError, ApiError, HawkErrorKind::Base64);
@@ -170,19 +242,22 @@ impl From<HawkErrorKind> for HawkError {
     }
 }
 
+impl From<JwtErrorKind> for JwtError {
+    fn from(kind: JwtErrorKind) -> Self {
+        Self { kind }
+    }
+}
+
 impl From<ValidationErrorKind> for ValidationError {
     fn from(kind: ValidationErrorKind) -> Self {
         trace!("Validation Error: {:?}", kind);
         let status = match kind {
-            ValidationErrorKind::FromDetails(ref description, ref location, Some(ref name), _)
+            ValidationErrorKind::FromDetails(ref _description, ref location, Some(ref name), _)
                 if *location == RequestErrorLocation::Header =>
             {
                 match name.to_ascii_lowercase().as_str() {
                     "accept" => StatusCode::NOT_ACCEPTABLE,
                     "content-type" => StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                    "content-length" if description == "size-limit-exceeded" => {
-                        StatusCode::PAYLOAD_TOO_LARGE
-                    }
                     _ => StatusCode::BAD_REQUEST,
                 }
             }
@@ -206,9 +281,22 @@ impl From<HawkErrorKind> for ApiError {
     }
 }
 
+impl From<JwtErrorKind> for ApiError {
+    fn from(kind: JwtErrorKind) -> Self {
+        let jwt_error: JwtError = kind.into();
+        jwt_error.into()
+    }
+}
+
 impl From<ParseError> for ApiError {
     fn from(inner: ParseError) -> Self {
         HawkErrorKind::Parse(inner).into()
+    }
+}
+
+impl From<ParseError> for JwtErrorKind {
+    fn from(inner: ParseError) -> Self {
+        JwtErrorKind::Parse(inner)
     }
 }
 
@@ -222,13 +310,6 @@ impl From<ValidationErrorKind> for ApiError {
 impl From<ValidationErrorKind> for ActixError {
     fn from(kind: ValidationErrorKind) -> Self {
         let api_error: ApiError = kind.into();
-        api_error.into()
-    }
-}
-
-impl From<ValidationError> for ActixError {
-    fn from(inner: ValidationError) -> Self {
-        let api_error: ApiError = inner.into();
         api_error.into()
     }
 }

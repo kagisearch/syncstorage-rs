@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, cell::RefCell};
 
 use actix_http::h1;
 use actix_web::{
@@ -24,6 +24,7 @@ use syncstorage_settings::{Deadman, ServerLimits, Settings as SyncstorageSetting
 
 use super::CollectionPostRequest;
 use crate::{server::ServerState, web::auth::HawkPayload};
+use tokenserver_auth::{ JWTVerifierImpl, oauth};
 
 lazy_static! {
     static ref SERVER_LIMITS: Arc<ServerLimits> = Arc::new(ServerLimits::default());
@@ -68,11 +69,24 @@ pub fn make_state() -> ServerState {
         deadman: Arc::new(RwLock::new(Deadman::default())),
         glean_logger,
         glean_enabled: syncstorage_settings.glean_enabled,
-        gcs_client: None,
-        gcs_control_client: None,
         gcs_payload_bucket: None,
-        gcs_payload_max_concurrency: syncstorage_settings.gcs_payload_max_concurrency,
         gcs_payload_offload_collections: Arc::new(Vec::new()),
+        #[cfg(debug_assertions)]
+        gcs_endpoint: None,
+        jwks_url: format!(
+            "{}{}",
+            syncserver_settings.tokenserver.fxa_oauth_server_url.trim_end_matches('/'),
+            "/realms/kagi/protocol/openid-connect/certs",
+        ),
+        email_domain: syncserver_settings.tokenserver.fxa_email_domain.clone(),
+        oauth_request_timeout: 10,
+        oauth_verifier: {
+            let jwk_verifiers: Vec<JWTVerifierImpl> = Vec::new();
+            RefCell::new(Box::new(
+                oauth::Verifier::new(jwk_verifiers)
+                    .expect("Could not create oauth verifier in get_test_state"),
+            ))
+        },
     }
 }
 

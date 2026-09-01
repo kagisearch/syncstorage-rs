@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from google.api_core import exceptions as gax_exceptions
+from statsd.defaults.env import statsd as statsd_singleton
 
 import reconcile_payload_links as reconciler
 
@@ -37,13 +38,6 @@ def _msg(mods: list[dict[str, str]]) -> bytes:
     ).encode()
 
 
-@pytest.fixture
-def statsd_incr(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
-    incr = MagicMock()
-    monkeypatch.setattr(reconciler.metrics, "incr", incr)
-    return incr
-
-
 def _mod(old: str | None, new: str | None) -> dict[str, str]:
     """Build a mod dict in the wire shape (string-valued JSON fields)."""
 
@@ -55,7 +49,9 @@ def _mod(old: str | None, new: str | None) -> dict[str, str]:
     return {"keys": "{}", "oldValues": encode(old), "newValues": encode(new)}
 
 
-def test_insert_with_link_finalizes(statsd_incr: MagicMock) -> None:
+def test_insert_with_link_finalizes(monkeypatch: pytest.MonkeyPatch) -> None:
+    statsd_incr = MagicMock()
+    monkeypatch.setattr(statsd_singleton, "incr", statsd_incr)
     gcs = _gcs_mock()
 
     reconciler.handle_message_body(gcs, BUCKET, _msg([_mod(None, LINK_A)]))
@@ -65,10 +61,12 @@ def test_insert_with_link_finalizes(statsd_incr: MagicMock) -> None:
     blob.delete.assert_not_called()
     assert blob.metadata == {"committed": "true"}
     assert blob.custom_time == reconciler.MAX_CUSTOM_TIME
-    statsd_incr.assert_any_call("finalizes")
+    statsd_incr.assert_any_call("payload_reconciler.finalizes")
 
 
-def test_delete_with_old_link_deletes(statsd_incr: MagicMock) -> None:
+def test_delete_with_old_link_deletes(monkeypatch: pytest.MonkeyPatch) -> None:
+    statsd_incr = MagicMock()
+    monkeypatch.setattr(statsd_singleton, "incr", statsd_incr)
     gcs = _gcs_mock()
 
     reconciler.handle_message_body(gcs, BUCKET, _msg([_mod(LINK_A, None)]))
@@ -76,22 +74,28 @@ def test_delete_with_old_link_deletes(statsd_incr: MagicMock) -> None:
     blob = gcs.bucket.return_value.blob.return_value
     blob.delete.assert_called_once()
     blob.patch.assert_not_called()
-    statsd_incr.assert_any_call("orphan_deletes")
+    statsd_incr.assert_any_call("payload_reconciler.orphan_deletes")
 
 
-def test_update_replace_does_both(statsd_incr: MagicMock) -> None:
+def test_update_replace_does_both(monkeypatch: pytest.MonkeyPatch) -> None:
+    statsd_incr = MagicMock()
+    monkeypatch.setattr(statsd_singleton, "incr", statsd_incr)
     gcs = _gcs_mock()
 
     reconciler.handle_message_body(gcs, BUCKET, _msg([_mod(LINK_A, LINK_B)]))
 
     # One blob created per .blob(name) call. Both ops happened.
     assert gcs.bucket.return_value.blob.call_count == 2
-    statsd_incr.assert_any_call("finalizes")
-    statsd_incr.assert_any_call("orphan_deletes")
+    statsd_incr.assert_any_call("payload_reconciler.finalizes")
+    statsd_incr.assert_any_call("payload_reconciler.orphan_deletes")
 
 
-def test_unchanged_link_finalizes_only_no_delete(statsd_incr: MagicMock) -> None:
+def test_unchanged_link_finalizes_only_no_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Old == new: finalize only; the object is still referenced."""
+    statsd_incr = MagicMock()
+    monkeypatch.setattr(statsd_singleton, "incr", statsd_incr)
     gcs = _gcs_mock()
 
     reconciler.handle_message_body(gcs, BUCKET, _msg([_mod(LINK_A, LINK_A)]))
@@ -101,8 +105,10 @@ def test_unchanged_link_finalizes_only_no_delete(statsd_incr: MagicMock) -> None
     blob.delete.assert_not_called()
 
 
-def test_both_null_records_noop_skip(statsd_incr: MagicMock) -> None:
+def test_both_null_records_noop_skip(monkeypatch: pytest.MonkeyPatch) -> None:
     """Inert noise that the Dataflow filter should have dropped."""
+    statsd_incr = MagicMock()
+    monkeypatch.setattr(statsd_singleton, "incr", statsd_incr)
     gcs = _gcs_mock()
 
     reconciler.handle_message_body(gcs, BUCKET, _msg([_mod(None, None)]))
@@ -110,11 +116,13 @@ def test_both_null_records_noop_skip(statsd_incr: MagicMock) -> None:
     blob = gcs.bucket.return_value.blob.return_value
     blob.patch.assert_not_called()
     blob.delete.assert_not_called()
-    statsd_incr.assert_any_call("noop_skips")
+    statsd_incr.assert_any_call("payload_reconciler.noop_skips")
 
 
-def test_finalize_404_is_success(statsd_incr: MagicMock) -> None:
+def test_finalize_404_is_success(monkeypatch: pytest.MonkeyPatch) -> None:
     """A 404 on patch is treated as success (idempotency)."""
+    statsd_incr = MagicMock()
+    monkeypatch.setattr(statsd_singleton, "incr", statsd_incr)
     gcs = _gcs_mock()
     gcs.bucket.return_value.blob.return_value.patch.side_effect = (
         gax_exceptions.NotFound("gone")
@@ -123,11 +131,13 @@ def test_finalize_404_is_success(statsd_incr: MagicMock) -> None:
     # Should not raise.
     reconciler.handle_message_body(gcs, BUCKET, _msg([_mod(None, LINK_A)]))
 
-    statsd_incr.assert_any_call("gcs_404", tags=["op:finalize"])
+    statsd_incr.assert_any_call("payload_reconciler.gcs_404.finalize")
 
 
-def test_delete_404_is_success(statsd_incr: MagicMock) -> None:
+def test_delete_404_is_success(monkeypatch: pytest.MonkeyPatch) -> None:
     """A 404 on delete is treated as success (idempotency)."""
+    statsd_incr = MagicMock()
+    monkeypatch.setattr(statsd_singleton, "incr", statsd_incr)
     gcs = _gcs_mock()
     gcs.bucket.return_value.blob.return_value.delete.side_effect = (
         gax_exceptions.NotFound("gone")
@@ -135,10 +145,10 @@ def test_delete_404_is_success(statsd_incr: MagicMock) -> None:
 
     reconciler.handle_message_body(gcs, BUCKET, _msg([_mod(LINK_A, None)]))
 
-    statsd_incr.assert_any_call("gcs_404", tags=["op:delete"])
+    statsd_incr.assert_any_call("payload_reconciler.gcs_404.delete")
 
 
-def test_cross_bucket_link_is_rejected() -> None:
+def test_cross_bucket_link_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     """A payload_link referencing a different bucket aborts the message."""
     gcs = _gcs_mock()
 
@@ -148,7 +158,11 @@ def test_cross_bucket_link_is_rejected() -> None:
         )
 
 
-def test_multiple_mods_handled_independently(statsd_incr: MagicMock) -> None:
+def test_multiple_mods_handled_independently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    statsd_incr = MagicMock()
+    monkeypatch.setattr(statsd_singleton, "incr", statsd_incr)
     gcs = _gcs_mock()
 
     reconciler.handle_message_body(
@@ -162,12 +176,12 @@ def test_multiple_mods_handled_independently(statsd_incr: MagicMock) -> None:
     finalize_count = sum(
         1
         for call in statsd_incr.call_args_list
-        if call.args and call.args[0] == "finalizes"
+        if call.args and call.args[0] == "payload_reconciler.finalizes"
     )
     delete_count = sum(
         1
         for call in statsd_incr.call_args_list
-        if call.args and call.args[0] == "orphan_deletes"
+        if call.args and call.args[0] == "payload_reconciler.orphan_deletes"
     )
     assert finalize_count == 2  # LINK_B from mod 1; LINK_A from mod 2
     assert delete_count == 2  # LINK_A from mod 1; LINK_B from mod 3

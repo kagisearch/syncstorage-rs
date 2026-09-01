@@ -2,10 +2,8 @@ use actix_web::{Error, FromRequest, HttpRequest, dev::Payload};
 use futures::future::LocalBoxFuture;
 
 use syncserver_common::Metrics;
-use syncstorage_db::UserIdentifier;
-use tokenserver_auth::TokenserverOrigin;
 
-use super::{BsoParam, BsoQueryParams, CollectionParam, HawkIdentifier};
+use super::{BsoParam, BsoQueryParams, CollectionParam};
 use crate::server::MetricsWrapper;
 
 /// BSO Request Delete/Get extractor
@@ -14,8 +12,6 @@ use crate::server::MetricsWrapper;
 #[derive(Debug)]
 pub struct BsoRequest {
     pub collection: String,
-    pub user_id: UserIdentifier,
-    pub tokenserver_origin: TokenserverOrigin,
     pub query: BsoQueryParams,
     pub bso: String,
     pub metrics: Metrics,
@@ -29,8 +25,8 @@ impl FromRequest for BsoRequest {
         let req = req.clone();
         let mut payload = payload.take();
         Box::pin(async move {
-            let (user_id, query, collection, bso) =
-                <(HawkIdentifier, BsoQueryParams, CollectionParam, BsoParam)>::from_request(
+            let (query, collection, bso) =
+                <(BsoQueryParams, CollectionParam, BsoParam)>::from_request(
                     &req,
                     &mut payload,
                 )
@@ -39,8 +35,6 @@ impl FromRequest for BsoRequest {
 
             Ok(BsoRequest {
                 collection,
-                tokenserver_origin: user_id.tokenserver_origin,
-                user_id: user_id.into(),
                 query,
                 bso: bso.bso,
                 metrics: MetricsWrapper::extract(&req).await?.0,
@@ -88,7 +82,6 @@ mod tests {
         req.extensions_mut().insert(make_db());
         let result = block_on(BsoRequest::extract(&req))
             .expect("Could not get result in test_valid_bso_request");
-        assert_eq!(result.user_id.legacy_id, *USER_ID);
         assert_eq!(&result.collection, "tabs");
         assert_eq!(&result.bso, "asdf");
     }
@@ -154,7 +147,6 @@ mod tests {
         let result = block_on(BsoRequest::extract(&req))
             .expect("Could not get result in test_valid_collection_request");
         // make sure the altered bsoid matches the unaltered one, without the quotes and cury braces.
-        assert_eq!(result.user_id.legacy_id, *USER_ID);
         assert_eq!(altered_bso.as_str(), result.bso);
     }
 }

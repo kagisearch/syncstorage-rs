@@ -1,0 +1,302 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Launch rs-syncserver",
+            "args": ["--config", "config/local.toml"],
+            "console": "integratedTerminal",
+            "env": {
+                "RUST_BACKTRACE": "full",
+                "RUST_LOG": "debug"
+            },
+            "initCommands": [
+                "command script import \"${env:HOME}/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/etc/lldb_lookup.py\"",
+                "command source -s 0 \"${env:HOME}/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/etc/lldb_commands\""
+            ],
+            "program": "${workspaceFolder}/target/debug/syncserver",
+        },
+        {
+            "type": "lldb",
+            "request": "attach",
+            "name": "Attach",
+            "pid": "${command:pickMyProcess}" // use ${command:pickProcess} to pick other users' processes
+        },
+        {
+            "type": "lldb",
+            "request": "attach",
+            "name": "Attach to rs-syncserver",
+            "program": "${workspaceFolder}/target/debug/syncserver", 
+        },
+        {
+            "type": "lldb",
+            "request": "attach",
+            "name": "Attach to PID syncserver",
+            "pid": "${input:syncserverPID}" 
+        },
+        {
+            "name": "Debug unit tests in library 'syncserver_common'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--package=syncserver-common"
+                ]
+            }
+        },
+        {
+            "name": "Debug unit tests in library 'syncserver_db_common'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--package=syncserver-db-common"
+                ]
+            }
+        },
+        {
+            "name": "Debug unit tests in library 'syncserver_settings'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--package=syncserver-settings"
+                ]
+            }
+        },
+        {
+            "name": "Debug unit tests in library 'syncstorage_settings'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--package=syncstorage-settings"
+                ]
+            }
+        },
+        {
+            "name": "Debug unit tests in library 'tokenserver_settings'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--package=tokenserver-settings"
+                ]
+            }
+        },
+        {
+            "name": "Debug unit tests in library 'tokenserver_common'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--package=tokenserver-common"
+                ]
+            }
+        },
+        {
+            "name": "Debug unit tests in library 'syncstorage_db'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--package=syncstorage-db"
+                ]
+            }
+        },
+        {
+            "name": "Debug unit tests in library 'syncstorage_db_common'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--package=syncstorage-db-common"
+                ]
+            }
+        },
+        {
+            "name": "Debug unit tests in library 'syncstorage_mysql'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--package=syncstorage-mysql"
+                ]
+            }
+        },
+        {
+            "name": "Debug unit tests in library 'syncstorage_postgres'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--package=syncstorage-postgres"
+                ]
+            }
+        },
+        {
+            "name": "Debug unit tests in library 'syncstorage_spanner'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--package=syncstorage-spanner"
+                ]
+            }
+        },
+        {
+            "name": "Debug unit tests in library 'tokenserver_auth'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--package=tokenserver-auth"
+                ]
+            }
+        },
+        {
+            "name": "Debug unit tests in library 'tokenserver_db'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--package=tokenserver-db"
+                ]
+            }
+        },
+        {
+            "name": "Debug unit tests in library 'tokenserver_db_common'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--package=tokenserver-db-common"
+                ]
+            }
+        },
+        {
+            "name": "Debug unit tests in library 'tokenserver_mysql'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--package=tokenserver-mysql"
+                ]
+            }
+        },
+        {
+            "name": "Debug unit tests in library 'tokenserver_postgres'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--package=tokenserver-postgres"
+                ]
+            }
+        },
+        {
+            "name": "Debug unit tests in library 'syncserver'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--package=syncserver"
+                ]
+            }
+        },
+        {
+            "name": "Debug executable 'syncserver'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--bin=syncserver",
+                    "--package=syncserver"
+                ]
+            },
+            "args": []
+        },
+        {
+            "name": "Debug unit tests in executable 'syncserver'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--bin=syncserver",
+                    "--package=syncserver"
+                ]
+            }
+        },
+        {
+            "name": "Debug example 'generate_openapi_spec'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--example=generate_openapi_spec",
+                    "--package=syncserver"
+                ]
+            },
+            "args": []
+        },
+        {
+            "name": "Debug unit tests in example 'generate_openapi_spec'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--example=generate_openapi_spec",
+                    "--package=syncserver"
+                ]
+            }
+        },
+        {
+            "name": "Debug unit tests in library 'glean'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--package=glean"
+                ]
+            }
+        }
+    ],
+    "inputs": [
+        {
+          "id": "syncserverPID",
+          "type": "command",
+          "command": "shellCommand.execute",
+          "args": {
+            "command": "ps -A | grep '[s]yncserver' | awk '{print $1}'",
+            "description": "Select syncserver PID",
+            "useFirstResult": true,
+          }
+        }
+    ]
+}

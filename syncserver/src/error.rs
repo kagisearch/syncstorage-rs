@@ -23,7 +23,7 @@ use syncstorage_db::{DbError, DbErrorIntrospect};
 
 use thiserror::Error;
 
-use crate::web::error::{HawkError, ValidationError};
+use crate::web::error::{HawkError, JwtError, ValidationError};
 use std::error::Error;
 
 /// Legacy Sync 1.1 error codes, which Sync 1.5 also returns by replacing the descriptive JSON
@@ -75,6 +75,9 @@ pub enum ApiErrorKind {
     #[error("HAWK authentication error: {}", _0)]
     Hawk(HawkError),
 
+    #[error("JWT authentication error: {}", _0)]
+    Jwt(JwtError),
+
     #[error("No app_data ServerState")]
     NoServerState,
 
@@ -89,6 +92,7 @@ impl ApiErrorKind {
     pub fn metric_label(&self) -> Option<&str> {
         match self {
             ApiErrorKind::Hawk(err) => err.metric_label(),
+            ApiErrorKind::Jwt(err) => err.metric_label(),
             ApiErrorKind::Db(err) => err.metric_label(),
             ApiErrorKind::Validation(err) => err.metric_label(),
             _ => None,
@@ -97,14 +101,6 @@ impl ApiErrorKind {
 }
 
 impl ApiError {
-    pub fn internal(msg: impl Into<String>) -> Self {
-        ApiErrorKind::Internal(msg.into()).into()
-    }
-
-    pub fn no_server_state() -> Self {
-        ApiErrorKind::NoServerState.into()
-    }
-
     pub fn is_sentry_event(&self) -> bool {
         // Should we report this error to sentry?
         self.status.is_server_error()
@@ -183,6 +179,7 @@ impl From<ApiErrorKind> for ApiError {
         let status = match &kind {
             ApiErrorKind::Db(error) => error.status,
             ApiErrorKind::Hawk(_) => StatusCode::UNAUTHORIZED,
+            ApiErrorKind::Jwt(_) => StatusCode::UNAUTHORIZED,
             ApiErrorKind::NoServerState | ApiErrorKind::Internal(_) | ApiErrorKind::GCS(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
@@ -247,6 +244,7 @@ impl Serialize for ApiErrorKind {
             ApiErrorKind::Db(ref error) => serialize_string_to_array(serializer, error),
             ApiErrorKind::GCS(ref error) => serialize_string_to_array(serializer, error),
             ApiErrorKind::Hawk(ref error) => serialize_string_to_array(serializer, error),
+            ApiErrorKind::Jwt(ref error) => serialize_string_to_array(serializer, error),
             ApiErrorKind::Internal(ref description) => {
                 serialize_string_to_array(serializer, description)
             }
@@ -282,6 +280,7 @@ impl From<DbError> for ApiError {
 
 from_error!(google_cloud_storage::Error, ApiError, ApiErrorKind::GCS);
 from_error!(HawkError, ApiError, ApiErrorKind::Hawk);
+from_error!(JwtError, ApiError, ApiErrorKind::Jwt);
 from_error!(ValidationError, ApiError, ApiErrorKind::Validation);
 
 impl ReportableError for ApiError {

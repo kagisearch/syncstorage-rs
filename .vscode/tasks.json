@@ -1,0 +1,23 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "cargo build (mysql)",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"build",
+				"--no-default-features",
+				"--features=syncstorage-db/mysql",
+				"--features=py_verifier"
+			],
+			"group": "build",
+			"problemMatcher": [
+				"$rustc"
+			],
+			"presentation": {
+				"reveal": "silent"
+			}
+		}
+	]
+}

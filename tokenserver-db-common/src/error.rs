@@ -22,16 +22,8 @@ impl DbError {
         DbErrorKind::Internal(msg).into()
     }
 
-    pub fn user_not_created() -> Self {
-        DbErrorKind::UserNotCreated.into()
-    }
-
     pub fn pool_timeout(timeout_type: deadpool::managed::TimeoutType) -> Self {
         DbErrorKind::PoolTimeout(timeout_type).into()
-    }
-
-    pub fn is_user_not_created(&self) -> bool {
-        matches!(&self.kind, DbErrorKind::UserNotCreated)
     }
 
     #[cfg(debug_assertions)]
@@ -67,9 +59,6 @@ impl ReportableError for DbError {
 
 #[derive(Debug, Error)]
 enum DbErrorKind {
-    #[error("Specified user does not exist (new users are not allowed)")]
-    UserNotCreated,
-
     #[error("{}", _0)]
     Sql(SqlError),
 
@@ -83,11 +72,6 @@ enum DbErrorKind {
 impl From<DbErrorKind> for DbError {
     fn from(kind: DbErrorKind) -> Self {
         match kind {
-            DbErrorKind::UserNotCreated => Self {
-                kind,
-                status: StatusCode::FORBIDDEN,
-                backtrace: Box::new(Backtrace::new_unresolved()),
-            },
             DbErrorKind::Sql(ref sqle) => Self {
                 status: sqle.status,
                 backtrace: Box::new(sqle.backtrace.clone()),
@@ -104,15 +88,6 @@ impl From<DbErrorKind> for DbError {
 
 impl From<DbError> for TokenserverError {
     fn from(db_error: DbError) -> Self {
-        if db_error.is_user_not_created() {
-            return TokenserverError {
-                context: db_error.to_string(),
-                backtrace: db_error.backtrace.clone(),
-                source: Some(Box::new(db_error)),
-                ..TokenserverError::new_users_disabled()
-            };
-        }
-
         TokenserverError {
             // `description` is serialized into the HTTP response body, so it must stay generic.
             // Let `..internal_error()` supply the "Server error" description; the detailed driver

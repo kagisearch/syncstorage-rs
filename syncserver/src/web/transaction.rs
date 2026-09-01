@@ -12,7 +12,7 @@ use syncstorage_db::{
 };
 
 use super::extractors::{
-    BsoParam, CollectionParam, HawkIdentifier, PreConditionHeader, PreConditionHeaderOpt,
+    BsoParam, CollectionParam, PreConditionHeader, PreConditionHeaderOpt,
 };
 use crate::error::{ApiError, ApiErrorKind};
 use crate::server::{MetricsWrapper, ServerState};
@@ -31,7 +31,7 @@ enum InTxOutcome<R> {
 pub struct DbTransactionPool {
     pool: Box<dyn DbPool<Error = DbError>>,
     is_read: bool,
-    user_id: UserIdentifier,
+    //user_id: UserIdentifier,
     collection: Option<String>,
     bso_opt: Option<String>,
     precondition: PreConditionHeaderOpt,
@@ -57,16 +57,17 @@ impl DbTransactionPool {
     async fn transaction_internal<A, R>(
         &self,
         request: &HttpRequest,
+        user_id: &UserIdentifier,
         action: A,
     ) -> Result<(R, Box<dyn Db<Error = DbError>>), ApiError>
     where
-        A: AsyncFnOnce(&mut dyn Db<Error = DbError>) -> Result<R, ApiError>,
+        A: AsyncFnOnce(&UserIdentifier, &mut dyn Db<Error = DbError>) -> Result<R, ApiError>,
     {
         // Get connection from pool
         let mut db = self.pool.get().await?;
 
         // Lock for transaction
-        let result = match (self.get_lock_collection(), self.is_read) {
+        let result = match (self.get_lock_collection(user_id), self.is_read) {
             (Some(lc), true) => db.lock_for_read(lc).await,
             (Some(lc), false) => db.lock_for_write(lc).await,
             (None, is_read) => db.begin(!is_read).await,
@@ -84,7 +85,7 @@ impl DbTransactionPool {
         // implicitly create them, so commit/rollback are always called to
         // finish them. They noop when no implicit transaction was created
         // (maybe rename them to maybe_commit/rollback?)
-        match action(&mut *db).await {
+        match action(user_id, &mut *db).await {
             Ok(resp) => Ok((resp, db)),
             Err(e) => {
                 db.rollback().await?;
@@ -98,11 +99,11 @@ impl DbTransactionPool {
     }
 
     /// Perform an action inside of a DB transaction.
-    pub async fn transaction<A, R>(&self, request: &HttpRequest, action: A) -> Result<R, ApiError>
+    pub async fn transaction<A, R>(&self, request: &HttpRequest, user_id: &UserIdentifier, action: A) -> Result<R, ApiError>
     where
-        A: AsyncFnOnce(&mut dyn Db<Error = DbError>) -> Result<R, ApiError>,
+        A: AsyncFnOnce(&UserIdentifier, &mut dyn Db<Error = DbError>) -> Result<R, ApiError>,
     {
-        let (resp, mut db) = self.transaction_internal(request, action).await?;
+        let (resp, mut db) = self.transaction_internal(request, user_id, action).await?;
         // No further processing before commit is possible
         db.commit().await?;
         Ok(resp)
@@ -113,17 +114,18 @@ impl DbTransactionPool {
     pub async fn transaction_http<A>(
         &self,
         request: &HttpRequest,
+        user_id: &UserIdentifier,
         action: A,
     ) -> Result<HttpResponse, ApiError>
     where
-        A: AsyncFnOnce(&mut dyn Db<Error = DbError>) -> Result<HttpResponse, ApiError>,
+        A: AsyncFnOnce(&UserIdentifier, &mut dyn Db<Error = DbError>) -> Result<HttpResponse, ApiError>,
     {
-        let check_precondition = async |db: &mut dyn Db<Error = DbError>| {
+        let check_precondition = async |user_id: &UserIdentifier, db: &mut dyn Db<Error = DbError>| {
             // set the extra information for all requests so we capture default err handlers.
             set_extra(request, db.get_connection_info());
             let resource_ts = db
                 .extract_resource(
-                    self.user_id.clone(),
+                    user_id.clone(),
                     self.collection.clone(),
                     self.bso_opt.clone(),
                 )
@@ -149,7 +151,7 @@ impl DbTransactionPool {
                 };
             }
 
-            let mut resp = action(db).await?;
+            let mut resp = action(user_id, db).await?;
 
             // See if we already extracted one and use that if possible
             if !resp.headers().contains_key(X_LAST_MODIFIED)
@@ -164,7 +166,7 @@ impl DbTransactionPool {
         };
 
         let (resp, mut db) = self
-            .transaction_internal(request, check_precondition)
+            .transaction_internal(request, user_id, check_precondition)
             .await?;
         // match on error and return a composed HttpResponse (so we can use the tags?)
 
@@ -189,6 +191,7 @@ impl DbTransactionPool {
     pub async fn transaction_http_then<A, R, F>(
         &self,
         request: &HttpRequest,
+        user_id: &UserIdentifier,
         action: A,
         finalize: F,
     ) -> Result<HttpResponse, ApiError>
@@ -196,11 +199,11 @@ impl DbTransactionPool {
         A: AsyncFnOnce(&mut dyn Db<Error = DbError>) -> Result<R, ApiError>,
         F: AsyncFnOnce(R) -> Result<HttpResponse, ApiError>,
     {
-        let in_tx = async |db: &mut dyn Db<Error = DbError>| -> Result<InTxOutcome<R>, ApiError> {
+        let in_tx = async |user_id: &UserIdentifier, db: &mut dyn Db<Error = DbError>| -> Result<InTxOutcome<R>, ApiError> {
             set_extra(request, db.get_connection_info());
             let resource_ts = db
                 .extract_resource(
-                    self.user_id.clone(),
+                    user_id.clone(),
                     self.collection.clone(),
                     self.bso_opt.clone(),
                 )
@@ -232,7 +235,7 @@ impl DbTransactionPool {
             Ok(InTxOutcome::Continue(r, resource_ts))
         };
 
-        let (outcome, mut db) = self.transaction_internal(request, in_tx).await?;
+        let (outcome, mut db) = self.transaction_internal(request, user_id, in_tx).await?;
         db.commit().await?;
 
         match outcome {
@@ -251,12 +254,12 @@ impl DbTransactionPool {
     }
 
     /// Create a lock collection if there is a collection to lock
-    fn get_lock_collection(&self) -> Option<params::LockCollection> {
+    fn get_lock_collection(&self, user_id: &UserIdentifier) -> Option<params::LockCollection> {
         self.collection
             .clone()
             .map(|collection| params::LockCollection {
                 collection,
-                user_id: self.user_id.clone(),
+                user_id: user_id.clone(),
             })
     }
 }
@@ -273,15 +276,6 @@ impl FromRequest for DbTransactionPool {
 
         let req = req.clone();
         async move {
-            let no_agent = HeaderValue::from_str("NONE")
-                .expect("Could not get no_agent in DbTransactionPool::from_request");
-            let useragent = req
-                .headers()
-                .get("user-agent")
-                .unwrap_or(&no_agent)
-                .to_str()
-                .unwrap_or("NONE");
-
             let col_result = CollectionParam::extrude(req.uri(), &mut req.extensions_mut());
             let state = match req.app_data::<Data<ServerState>>() {
                 Some(v) => v,
@@ -305,10 +299,6 @@ impl FromRequest for DbTransactionPool {
                 }
             };
             let method = req.method().clone();
-            let user_id = HawkIdentifier::extract(&req).await.map_err(|e| {
-                warn!("⚠️ Bad Hawk Id: {:?}", e; "user_agent"=> useragent);
-                e
-            })?;
             let bso = BsoParam::extrude(req.head(), &mut req.extensions_mut()).ok();
             let bso_opt = bso.map(|b| b.bso);
 
@@ -317,7 +307,7 @@ impl FromRequest for DbTransactionPool {
             let pool = Self {
                 pool: state.db_pool.clone(),
                 is_read,
-                user_id: user_id.into(),
+//                user_id: user_id.into(),
                 collection,
                 bso_opt,
                 precondition,

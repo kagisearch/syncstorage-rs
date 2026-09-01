@@ -1,7 +1,8 @@
 //! Main application server
 
-use std::{convert::Infallible, num::NonZeroUsize, sync::Arc, time::Duration};
+use std::{convert::Infallible, num::NonZeroUsize, sync::Arc, time::Duration, cell::RefCell};
 
+use crate::error::{ApiError};
 use actix_cors::Cors;
 use actix_web::{
     App, FromRequest, HttpRequest, HttpResponse, HttpServer,
@@ -14,31 +15,24 @@ use actix_web::{
 use cadence::{Gauged, StatsdClient};
 use futures::future::{self, Ready};
 use glean::server_events::GleanEventsLogger;
-use google_cloud_storage::client::{Storage, StorageControl};
-use tokio::{sync::RwLock, time};
-use utoipa::OpenApi;
-use utoipa_swagger_ui::SwaggerUi;
-
 use syncserver_common::{
     BlockingThreadpool, BlockingThreadpoolMetrics, Metrics, Taggable,
-    middleware::sentry::SentryWrapper,
+    //middleware::sentry::SentryWrapper,
 };
 use syncserver_db_common::GetPoolStatus;
 use syncserver_settings::Settings;
 use syncstorage_db::{DbError, DbPool, DbPoolImpl};
 use syncstorage_settings::{Deadman, ServerLimits};
+use tokenserver_auth::{JWTVerifierImpl, VerifyToken, oauth};
+use tokio::{sync::RwLock, time};
+use utoipa::{OpenApi};
+use utoipa_swagger_ui::SwaggerUi;
 
-use crate::{
-    error::ApiError,
-    tokenserver,
-    web::{
-        handlers, middleware,
-        payload_offload::{build_client, build_control_client},
-    },
-};
+use crate::tokenserver;
+use crate::web::{handlers, middleware};
 
-pub use syncserver_settings::COLLECTION_ID_REGEX;
 pub const BSO_ID_REGEX: &str = r"[ -~]{1,64}";
+pub const COLLECTION_ID_REGEX: &str = r"[a-zA-Z0-9._-]{1,32}";
 pub const SYNC_DOCS_URL: &str =
     "https://mozilla-services.readthedocs.io/en/latest/storage/apis-1.5.html";
 pub const TOKENSERVER_DOCS_URL: &str =
@@ -81,31 +75,16 @@ pub struct ServerState {
     /// Collections whose BSO payloads are off-loaded to GCS.
     pub gcs_payload_offload_collections: Arc<Vec<String>>,
 
-    /// Shared GCS client built at startup. `None` when GCS off-load is disabled.
-    pub gcs_client: Option<Storage>,
+    pub email_domain: String,
+    pub jwks_url: String,
+    pub oauth_request_timeout: u64,
+    /// Override the GCS endpoint URL (for testing). When set the GCS client
+    /// is built with `.with_endpoint(...)` + anonymous credentials.
+    /// Debug-builds only; not available in release.
+    #[cfg(debug_assertions)]
+    pub gcs_endpoint: Option<String>,
+    pub oauth_verifier: RefCell<Box<dyn VerifyToken<JWTVerifierImpl, Output = oauth::VerifyOutput>>>,
 
-    /// Shared GCS control-plane client built at startup.  `None` when GCS off-load is disabled.
-    pub gcs_control_client: Option<StorageControl>,
-
-    /// Maximum GCS uploads/downloads to run concurrently.
-    pub gcs_payload_max_concurrency: NonZeroUsize,
-}
-
-impl ServerState {
-    /// Shared GCS client to use when [`crate::web::payload_offload::offload_bucket`] returns Some
-    /// bucket.
-    pub fn gcs_client(&self) -> Result<&Storage, ApiError> {
-        self.gcs_client
-            .as_ref()
-            .ok_or_else(|| ApiError::internal("GCS off-load enabled but client not initialized"))
-    }
-
-    /// Shared GCS control-plane client.  Available when GCS off-load is enabled.
-    pub fn gcs_control_client(&self) -> Result<&StorageControl, ApiError> {
-        self.gcs_control_client.as_ref().ok_or_else(|| {
-            ApiError::internal("GCS off-load enabled but control client not initialized")
-        })
-    }
 }
 
 pub fn cfg_path(path: &str) -> String {
@@ -183,8 +162,8 @@ macro_rules! build_app {
             // Middleware is applied LIFO
             // These will wrap all outbound responses with matching status codes.
             .wrap(ErrorHandlers::new().handler(StatusCode::NOT_FOUND, ApiError::render_404))
-            // These are our wrappers
-            .wrap(SentryWrapper::<ApiError>::new($metrics.clone()))
+            // These are our wrappers, remove SEntry reporting
+            //.wrap(SentryWrapper::<ApiError>::new($metrics.clone()))
             .wrap_fn(middleware::weave::set_weave_timestamp)
             .wrap_fn(tokenserver::logging::handle_request_log_line)
             .wrap_fn(middleware::rejectua::reject_user_agent)
@@ -215,17 +194,14 @@ macro_rules! build_app {
             .service(
                 web::resource(&cfg_path("/storage/{collection}"))
                     .app_data(
-                        // The resource-level payload limit is the ceiling
-                        // across the default and any per-collection overrides;
-                        // extractors enforce the actual per-collection
-                        // `max_request_bytes` once the collection is known.
-                        web::PayloadConfig::new($limits.effective_max_request_bytes() as usize),
+                        // Declare the payload limit for "normal" collections.
+                        web::PayloadConfig::new($limits.max_request_bytes as usize),
                     )
                     .app_data(
                         // Declare the payload limits for "JSON" payloads
                         // (Specify "text/plain" for legacy client reasons)
                         web::JsonConfig::default()
-                            .limit($limits.effective_max_request_bytes() as usize)
+                            .limit($limits.max_request_bytes as usize)
                             .content_type(|ct| ct == mime::TEXT_PLAIN),
                     )
                     .route(web::delete().to(handlers::delete_collection))
@@ -234,12 +210,10 @@ macro_rules! build_app {
             )
             .service(
                 web::resource(&cfg_path("/storage/{collection}/{bso}"))
-                    .app_data(web::PayloadConfig::new(
-                        $limits.effective_max_request_bytes() as usize,
-                    ))
+                    .app_data(web::PayloadConfig::new($limits.max_request_bytes as usize))
                     .app_data(
                         web::JsonConfig::default()
-                            .limit($limits.effective_max_request_bytes() as usize)
+                            .limit($limits.max_request_bytes as usize)
                             .content_type(|ct| ct == mime::TEXT_PLAIN),
                     )
                     .route(web::delete().to(handlers::delete_bso))
@@ -318,9 +292,9 @@ macro_rules! build_app_without_syncstorage {
             // Middleware is applied LIFO
             // These will wrap all outbound responses with matching status codes.
             .wrap(ErrorHandlers::new().handler(StatusCode::NOT_FOUND, ApiError::render_404))
-            .wrap(SentryWrapper::<tokenserver_common::TokenserverError>::new(
-                $metrics.clone(),
-            ))
+            //.wrap(SentryWrapper::<tokenserver_common::TokenserverError>::new(
+            //    $metrics.clone(),
+            // ))
             // These are our wrappers
             .wrap_fn(tokenserver::logging::handle_request_log_line)
             .wrap_fn(middleware::rejectua::reject_user_agent)
@@ -423,26 +397,11 @@ impl Server {
             app_channel: settings.environment.clone(),
         });
         let glean_enabled = settings.syncstorage.glean_enabled;
-        // TODO(STOR-650): gate this behind the spanner build feature so
-        // non-spanner builds can't carry offload config at all. Startup
-        // validation (STOR-627) rejects it at runtime in the meantime.
         let gcs_payload_bucket = settings.syncstorage.gcs_payload_bucket.clone();
         let gcs_payload_offload_collections =
             Arc::new(settings.syncstorage.gcs_payload_offload_collections.clone());
-        let gcs_payload_max_concurrency = settings.syncstorage.gcs_payload_max_concurrency;
-        let (gcs_client, gcs_control_client) = if gcs_payload_bucket.is_some() {
-            let endpoint = settings.syncstorage.gcs_endpoint.as_deref();
-            #[cfg(not(debug_assertions))]
-            if let Some(endpoint) = endpoint {
-                warn!("GCS endpoint override used in release: {}", endpoint);
-            }
-            (
-                Some(build_client(endpoint).await?),
-                Some(build_control_client(endpoint).await?),
-            )
-        } else {
-            (None, None)
-        };
+        #[cfg(debug_assertions)]
+        let gcs_endpoint = settings.syncstorage.gcs_endpoint.clone();
         let worker_thread_count =
             calculate_worker_max_blocking_threads(settings.worker_max_blocking_threads);
         let limits = Arc::new(settings.syncstorage.limits);
@@ -491,9 +450,37 @@ impl Server {
                 glean_enabled,
                 gcs_payload_bucket: gcs_payload_bucket.clone(),
                 gcs_payload_offload_collections: Arc::clone(&gcs_payload_offload_collections),
-                gcs_client: gcs_client.clone(),
-                gcs_control_client: gcs_control_client.clone(),
-                gcs_payload_max_concurrency,
+                #[cfg(debug_assertions)]
+                gcs_endpoint: gcs_endpoint.clone(),
+                email_domain: settings.tokenserver.fxa_email_domain.clone(),
+                jwks_url: format!("{}{}",
+                    settings.tokenserver.fxa_oauth_server_url.trim_end_matches('/'),
+                    "/realms/kagi/protocol/openid-connect/certs",
+                ),
+                oauth_request_timeout: 10,
+                oauth_verifier: {
+                    let mut jwk_verifiers: Vec<JWTVerifierImpl> = Vec::new();
+                    if let Some(primary) = &settings.tokenserver.fxa_oauth_primary_jwk {
+                        jwk_verifiers.push(
+                            primary
+                                .clone()
+                                .try_into()
+                                .expect("Invalid primary key, should either be fixed or removed"),
+                        )
+                    }
+                    if let Some(secondary) = &settings.tokenserver.fxa_oauth_secondary_jwk {
+                        jwk_verifiers.push(
+                            secondary
+                                .clone()
+                                .try_into()
+                                .expect("Invalid secondary key, should either be fixed or removed"),
+                        );
+                    }
+                    RefCell::new(Box::new(
+                        oauth::Verifier::new(jwk_verifiers)
+                            .expect("failed to create Tokenserver OAuth verifier"),
+                    ))
+                },
             };
 
             build_app!(
@@ -510,6 +497,7 @@ impl Server {
             server = server.keep_alive(Duration::from_secs(keep_alive as u64));
         }
 
+        info!("Starting server on {}:{}", host, port);
         let server = server
             .worker_max_blocking_threads(worker_thread_count)
             .bind(format!("{}:{}", host, port))

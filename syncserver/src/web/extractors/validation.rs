@@ -41,7 +41,7 @@ pub fn validate_body_bso_ttl(ttl: u32) -> Result<(), ValidationError> {
 mod tests {
     use serde_json::json;
 
-    use crate::web::extractors::test_utils::{USER_ID, post_collection};
+    use crate::web::extractors::test_utils::{post_collection};
 
     #[actix_rt::test]
     async fn test_max_ttl() {
@@ -53,7 +53,6 @@ mod tests {
         let result = post_collection("", &bso_body)
             .await
             .expect("Could not get result in test_valid_collection_post_request");
-        assert_eq!(result.user_id.legacy_id, *USER_ID);
         assert_eq!(&result.collection, "tabs");
         assert_eq!(result.bsos.valid.len(), 2);
         assert_eq!(result.bsos.invalid.len(), 1);

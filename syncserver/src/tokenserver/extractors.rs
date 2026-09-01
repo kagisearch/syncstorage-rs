@@ -6,6 +6,7 @@
 use core::fmt::Debug;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use actix_web::{
     FromRequest, HttpRequest,
@@ -249,7 +250,6 @@ impl FromRequest for TokenserverRequest {
                     client_state: auth_data.client_state.clone(),
                     keys_changed_at: auth_data.keys_changed_at,
                     capacity_release_rate: state.node_capacity_release_rate,
-                    allow_new_users: state.allow_new_users,
                 })
                 .await?;
             log_items_mutator.insert("first_seen_at".to_owned(), user.first_seen_at.to_string());
@@ -347,7 +347,7 @@ impl FromRequest for DbPoolWrapper {
 /// An authentication token as parsed from the `Authorization` header.
 /// Signed JWTs can be verified locally or via FxA.
 pub enum Token {
-    JWT(String),
+    JWT(Vec<u8>),
 }
 
 impl FromRequest for Token {
@@ -383,7 +383,18 @@ impl FromRequest for Token {
                 let auth_type = auth_type.to_ascii_lowercase();
 
                 if auth_type == "bearer" {
-                    Ok(Token::JWT(token.to_owned()))
+                    let out = match base64::engine::general_purpose::STANDARD.decode(token) {
+                        Ok(out) => out,
+                        Err(e) => {
+                            return Err(TokenserverError {
+                                description: "Unauthorized".to_owned(),
+                                location: ErrorLocation::Body,
+                                context: format!("Invalid base64 encoding in Authorization header: {}", e),
+                                ..Default::default()
+                            });
+                        }
+                    };
+                    Ok(Token::JWT(out.to_owned()))
                 } else {
                     // The request must use a Bearer token
                     Err(TokenserverError {
@@ -449,7 +460,7 @@ impl FromRequest for AuthData {
                     let mut tags = HashMap::default();
                     tags.insert("token_type".to_owned(), "OAuth".to_owned());
                     metrics.start_timer("token_verification", Some(tags));
-                    let verify_output = state.oauth_verifier.verify(token, &metrics).await?;
+                    let verify_output = state.oauth_verifier.verify(&token, &metrics).await?;
 
                     // For requests using OAuth, the keys_changed_at and client state are embedded
                     // in the X-KeyID header.
@@ -510,9 +521,9 @@ impl FromRequest for XClientStateHeader {
 // The key ID, as extracted from the X-KeyID header. The X-KeyID header is of the format
 // `[keys_changed_at]-[base64-encoded client state]` (e.g. `00000000000001234-qqo`)
 #[derive(Clone, Debug, PartialEq)]
-struct KeyId {
-    client_state: String,
-    keys_changed_at: i64,
+pub struct KeyId {
+    pub client_state: String,
+    pub keys_changed_at: i64,
 }
 
 impl FromRequest for KeyId {
@@ -526,8 +537,14 @@ impl FromRequest for KeyId {
             let headers = req.headers();
 
             // The X-KeyID header must be present for requests using OAuth
-            let x_key_id = headers
-                .get("X-KeyID")
+            let x_key_id_header = match headers.get("X-KeyID") {
+                Some(header) => Some(header),
+                _ => return Ok(KeyId {
+                    client_state: String::new(),
+                    keys_changed_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
+                }),
+            };
+            let x_key_id = x_key_id_header
                 .ok_or_else(|| {
                     TokenserverError::invalid_key_id("Missing X-KeyID header".to_owned())
                 })?
@@ -730,6 +747,7 @@ mod tests {
         let oauth_verifier = {
             let verify_output = oauth::VerifyOutput {
                 fxa_uid: fxa_uid.to_owned(),
+                role: "none".to_owned(),
                 generation: Some(1234),
             };
             let valid = true;
@@ -783,6 +801,7 @@ mod tests {
         let oauth_verifier = {
             let verify_output = oauth::VerifyOutput {
                 fxa_uid: fxa_uid.to_owned(),
+                role: "none".to_owned(),
                 generation: Some(1234),
             };
             let valid = false;
@@ -825,6 +844,7 @@ mod tests {
                 let verify_output = oauth::VerifyOutput {
                     fxa_uid: fxa_uid.to_owned(),
                     generation: Some(1234),
+                    role: "none".to_owned(),
                 };
                 let valid = true;
 
@@ -927,7 +947,8 @@ mod tests {
             let oauth_verifier = {
                 let current_time = Utc::now().timestamp();
                 let verify_output = oauth::VerifyOutput {
-                    fxa_uid: fxa_uid.to_owned(),
+                    fxa_uid: fxa_uid.to_owned(),                    
+                    role: "none".to_owned(),
                     generation: Some(current_time),
                 };
                 let valid = true;
@@ -1347,7 +1368,6 @@ mod tests {
             set_verifiers: Vec::new(),
             fxa_webhook_enabled: false,
             fxa_webhook_metrics_only: false,
-            allow_new_users: true,
         }
     }
 
@@ -1371,7 +1391,6 @@ mod tests {
             set_verifiers,
             fxa_webhook_enabled: true,
             fxa_webhook_metrics_only: false,
-            allow_new_users: true,
         }
     }
 

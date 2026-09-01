@@ -2,11 +2,9 @@ use actix_web::{Error, FromRequest, HttpRequest, dev::Payload, web::Data};
 use futures::future::LocalBoxFuture;
 
 use syncserver_common::Metrics;
-use syncstorage_db::UserIdentifier;
-use tokenserver_auth::TokenserverOrigin;
 
 use super::{
-    BatchRequest, BatchRequestOpt, BsoBodies, BsoQueryParams, CollectionParam, HawkIdentifier,
+    BatchRequest, BatchRequestOpt, BsoBodies, BsoQueryParams, CollectionParam,
     KNOWN_BAD_PAYLOAD_REGEX, RequestErrorLocation,
 };
 use crate::{
@@ -21,8 +19,6 @@ use crate::{
 /// Extracts/validates information needed for batch collection POST requests.
 pub struct CollectionPostRequest {
     pub collection: String,
-    pub user_id: UserIdentifier,
-    pub tokenserver_origin: TokenserverOrigin,
     pub query: BsoQueryParams,
     pub bsos: BsoBodies,
     pub batch: Option<BatchRequest>,
@@ -60,8 +56,8 @@ impl FromRequest for CollectionPostRequest {
 
             let max_post_records = i64::from(state.limits.max_post_records);
 
-            let (user_id, collection, query, mut bsos) =
-                <(HawkIdentifier, CollectionParam, BsoQueryParams, BsoBodies)>::from_request(
+            let (collection, query, mut bsos) =
+                <(CollectionParam, BsoQueryParams, BsoBodies)>::from_request(
                     &req,
                     &mut payload,
                 )
@@ -99,8 +95,6 @@ impl FromRequest for CollectionPostRequest {
             let batch = BatchRequestOpt::extract(&req).await?;
             Ok(CollectionPostRequest {
                 collection,
-                tokenserver_origin: user_id.tokenserver_origin,
-                user_id: user_id.into(),
                 query,
                 bsos,
                 batch: batch.opt,
@@ -117,7 +111,7 @@ mod tests {
     use serde_json::json;
 
     use crate::web::extractors::test_utils::{
-        USER_ID, extract_body_as_str, make_state, post_collection,
+        extract_body_as_str, make_state, post_collection,
     };
 
     #[actix_rt::test]
@@ -130,7 +124,6 @@ mod tests {
         let result = post_collection("", &bso_body)
             .await
             .expect("Could not get result in test_valid_collection_post_request");
-        assert_eq!(result.user_id.legacy_id, *USER_ID);
         assert_eq!(&result.collection, "tabs");
         assert_eq!(result.bsos.valid.len(), 2);
         assert!(result.batch.is_none());
@@ -146,7 +139,6 @@ mod tests {
         let result = post_collection("", &bso_body)
             .await
             .expect("Could not get result in test_invalid_collection_post_request");
-        assert_eq!(result.user_id.legacy_id, *USER_ID);
         assert_eq!(&result.collection, "tabs");
         assert_eq!(result.bsos.invalid.len(), 2);
     }
@@ -162,7 +154,6 @@ mod tests {
         let result = post_collection("batch=True", &bso_body)
             .await
             .expect("Could not get result in test_valid_collection_batch_post_request");
-        assert_eq!(result.user_id.legacy_id, *USER_ID);
         assert_eq!(&result.collection, "tabs");
         assert_eq!(result.bsos.valid.len(), 2);
         let batch = result

@@ -1,4 +1,4 @@
-use super::{BsoPutRequest, BsoRequest, CollectionPostRequest, CollectionRequest, MetaRequest};
+use super::{MetaRequest, JwtAuthData};
 
 pub trait EmitApiMetric {
     fn emit_api_metric(&self, label: &str);
@@ -18,8 +18,5 @@ macro_rules! impl_emit_api_metric {
     };
 }
 
+impl_emit_api_metric!(JwtAuthData);
 impl_emit_api_metric!(MetaRequest);
-impl_emit_api_metric!(CollectionRequest);
-impl_emit_api_metric!(CollectionPostRequest);
-impl_emit_api_metric!(BsoRequest);
-impl_emit_api_metric!(BsoPutRequest);

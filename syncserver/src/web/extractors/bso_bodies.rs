@@ -6,15 +6,15 @@ use actix_web::{
     http::header::{ContentType, Header},
     web::Data,
 };
-use futures::future::LocalBoxFuture;
+use futures::{
+    TryFutureExt,
+    future::{self, LocalBoxFuture},
+};
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{
-    ACCEPTED_CONTENT_TYPES, BatchBsoBody, CollectionParam, RequestErrorLocation,
-    utils::check_content_length,
-};
-use crate::{error::ApiError, server::ServerState, web::error::ValidationErrorKind};
+use super::{ACCEPTED_CONTENT_TYPES, BatchBsoBody, CollectionParam, RequestErrorLocation};
+use crate::{server::ServerState, web::error::ValidationErrorKind};
 
 #[derive(Default, Deserialize)]
 pub struct BsoBodies {
@@ -36,59 +36,96 @@ impl FromRequest for BsoBodies {
     ///
     /// No collection id is used, so payload checks are not done here.
     fn from_request(req: &HttpRequest, payload: &mut Payload) -> Self::Future {
-        let req = req.clone();
-        let mut payload = payload.take();
-
-        Box::pin(async move {
-            // Only try and parse the body if its a valid content-type
-            let ctype = ContentType::parse(&req).map_err(|e| {
-                ValidationErrorKind::FromDetails(
-                    format!("Unreadable Content-Type: {e:?}"),
-                    RequestErrorLocation::Header,
-                    Some("Content-Type".to_owned()),
-                    Some("request.error.invalid_content_type"),
-                )
-            })?;
-            let content_type = format!("{}/{}", ctype.type_(), ctype.subtype());
-            trace!("BSO Body content_type: {content_type:?}");
-
-            if !ACCEPTED_CONTENT_TYPES.contains(&content_type.as_ref()) {
-                return Err(ValidationErrorKind::FromDetails(
-                    format!("Invalid Content-Type {content_type:?}"),
-                    RequestErrorLocation::Header,
-                    Some("Content-Type".to_owned()),
-                    Some("request.error.invalid_content_type"),
-                )
-                .into());
+        // Only try and parse the body if its a valid content-type
+        let ctype = match ContentType::parse(req) {
+            Ok(v) => v,
+            Err(e) => {
+                return Box::pin(future::err(
+                    ValidationErrorKind::FromDetails(
+                        format!("Unreadable Content-Type: {:?}", e),
+                        RequestErrorLocation::Header,
+                        Some("Content-Type".to_owned()),
+                        Some("request.error.invalid_content_type"),
+                    )
+                    .into(),
+                ));
             }
+        };
+        let content_type = format!("{}/{}", ctype.type_(), ctype.subtype());
+        trace!("BSO Body content_type: {:?}", &content_type);
 
-            // Grab the max sizes
-            let state = req
-                .app_data::<Data<ServerState>>()
-                .ok_or_else(ApiError::no_server_state)?;
-            // Grab limits that can be overridden per collection
+        if !ACCEPTED_CONTENT_TYPES.contains(&content_type.as_ref()) {
+            return Box::pin(future::err(
+                ValidationErrorKind::FromDetails(
+                    format!("Invalid Content-Type {:?}", content_type),
+                    RequestErrorLocation::Header,
+                    Some("Content-Type".to_owned()),
+                    Some("request.error.invalid_content_type"),
+                )
+                .into(),
+            ));
+        }
+
+        // Load the entire request into a String
+        let fut = <String>::from_request(req, payload).map_err(|e| {
+            warn!("⚠️ Payload read error: {:?}", e);
+            ValidationErrorKind::FromDetails(
+                "Mimetype/encoding/content-length error".to_owned(),
+                RequestErrorLocation::Header,
+                None,
+                None,
+            )
+            .into()
+        });
+
+        // Avoid duplicating by defining our error func now, doesn't need the box wrapper
+        fn make_error() -> Error {
+            ValidationErrorKind::FromDetails(
+                "Invalid JSON in request body".to_owned(),
+                RequestErrorLocation::Body,
+                Some("bsos".to_owned()),
+                Some("request.validate.invalid_body_json"),
+            )
+            .into()
+        }
+
+        // Define a new bool to check from a static closure to release the reference on the
+        // content_type header
+        let newlines: bool = content_type == "application/newlines";
+
+        // Grab the max sizes
+        let state = match req.app_data::<Data<ServerState>>() {
+            Some(s) => s,
+            None => {
+                error!("⚠️ Could not load the app state");
+                return Box::pin(future::err(
+                    ValidationErrorKind::FromDetails(
+                        "Internal error".to_owned(),
+                        RequestErrorLocation::Unknown,
+                        Some("app_data".to_owned()),
+                        None,
+                    )
+                    .into(),
+                ));
+            }
+        };
+
+        // `max_record_payload_bytes` can be overridden per collection
+        let max_payload_size = {
             let collection = CollectionParam::extrude(req.uri(), &mut req.extensions_mut())
                 .ok()
                 .flatten()
                 .map(|c| c.collection);
-            let coll_limits = state.limits.limits_for(collection.as_deref());
+            match collection {
+                Some(collection) => state.limits.max_record_payload_bytes_for(&collection),
+                None => state.limits.max_record_payload_bytes,
+            }
+        } as usize;
+        let max_post_bytes = state.limits.max_post_bytes as usize;
 
-            check_content_length(&req, coll_limits.max_request_bytes as usize)?;
-            // Load the entire request into a String
-            let body = <String>::from_request(&req, &mut payload)
-                .await
-                .map_err(|e| {
-                    warn!("⚠️ Payload read error: {:?}", e);
-                    ValidationErrorKind::FromDetails(
-                        "Mimetype/encoding/content-length error".to_owned(),
-                        RequestErrorLocation::Header,
-                        None,
-                        None,
-                    )
-                })?;
-
+        let fut = fut.and_then(move |body| {
             // Get all the raw / values
-            let bsos: Vec<Value> = if content_type == "application/newlines" {
+            let bsos: Vec<Value> = if newlines {
                 let mut bsos = Vec::new();
                 for item in body.lines() {
                     // Check that its a valid JSON map like we expect
@@ -96,7 +133,7 @@ impl FromRequest for BsoBodies {
                         bsos.push(raw_json);
                     } else {
                         // Per Python version, BSO's must json deserialize
-                        return Err(invalid_json());
+                        return future::err(make_error());
                     }
                 }
                 bsos
@@ -104,7 +141,7 @@ impl FromRequest for BsoBodies {
                 json_vals
             } else {
                 // Per Python version, BSO's must json deserialize
-                return Err(invalid_json());
+                return future::err(make_error());
             };
 
             // Validate all the BSO's, move invalid to our other list. Assume they'll all make
@@ -124,30 +161,36 @@ impl FromRequest for BsoBodies {
             for bso in bsos {
                 // Error out if its not a JSON mapping type
                 if !bso.is_object() {
-                    return Err(invalid_json());
+                    return future::err(make_error());
                 }
-
                 // Save all id's we get, check for missing id, or duplicate.
-                let Some(id) = bso.get("id").and_then(serde_json::Value::as_str) else {
-                    return Err(ValidationErrorKind::FromDetails(
-                        "Input BSO has no ID".to_owned(),
-                        RequestErrorLocation::Body,
-                        Some("bsos".to_owned()),
-                        Some("request.store.missing_bso_id"),
-                    )
-                    .into());
+                let bso_id = if let Some(id) = bso.get("id").and_then(serde_json::Value::as_str) {
+                    let id = id.to_string();
+                    if bso_ids.contains(&id) {
+                        return future::err(
+                            ValidationErrorKind::FromDetails(
+                                "Input BSO has duplicate ID".to_owned(),
+                                RequestErrorLocation::Body,
+                                Some("bsos".to_owned()),
+                                Some("request.store.duplicate_bso_id"),
+                            )
+                            .into(),
+                        );
+                    } else {
+                        bso_ids.insert(id.clone());
+                        id
+                    }
+                } else {
+                    return future::err(
+                        ValidationErrorKind::FromDetails(
+                            "Input BSO has no ID".to_owned(),
+                            RequestErrorLocation::Body,
+                            Some("bsos".to_owned()),
+                            Some("request.store.missing_bso_id"),
+                        )
+                        .into(),
+                    );
                 };
-                let bso_id = id.to_string();
-                if bso_ids.contains(&bso_id) {
-                    return Err(ValidationErrorKind::FromDetails(
-                        "Input BSO has duplicate ID".to_owned(),
-                        RequestErrorLocation::Body,
-                        Some("bsos".to_owned()),
-                        Some("request.store.duplicate_bso_id"),
-                    )
-                    .into());
-                }
-                bso_ids.insert(bso_id.clone());
                 match BatchBsoBody::from_raw_bso(bso) {
                     Ok(b) => {
                         // Is this record too large? Deny if it is.
@@ -157,8 +200,7 @@ impl FromRequest for BsoBodies {
                             .map(std::string::String::len)
                             .unwrap_or_default();
                         total_payload_size += payload_size;
-                        if payload_size <= coll_limits.max_record_payload_bytes as usize
-                            && total_payload_size <= coll_limits.max_post_bytes as usize
+                        if payload_size <= max_payload_size && total_payload_size <= max_post_bytes
                         {
                             valid.push(b);
                         } else {
@@ -170,18 +212,9 @@ impl FromRequest for BsoBodies {
                     }
                 }
             }
-            Ok(BsoBodies { valid, invalid })
-        })
-    }
-}
+            future::ok(BsoBodies { valid, invalid })
+        });
 
-/// Return an Invalid JSON error
-fn invalid_json() -> Error {
-    ValidationErrorKind::FromDetails(
-        "Invalid JSON in request body".to_owned(),
-        RequestErrorLocation::Body,
-        Some("bsos".to_owned()),
-        Some("request.validate.invalid_body_json"),
-    )
-    .into()
+        Box::pin(fut)
+    }
 }

@@ -29,17 +29,13 @@ use syncstorage_db::{
     DbPoolImpl, SyncTimestamp, params,
     results::{DeleteBso, GetBso, PutBso},
 };
-use syncstorage_settings::{CollectionLimitOverride, ServerLimits};
+use syncstorage_settings::ServerLimits;
+use tokenserver_auth::{ JWTVerifierImpl, oauth};
 
 use super::*;
-use crate::{
-    build_app, tokenserver,
-    web::{
-        auth::HawkPayload,
-        extractors::BsoBody,
-        payload_offload::{build_client, build_control_client},
-    },
-};
+use crate::build_app;
+use crate::tokenserver;
+use crate::web::{auth::HawkPayload, extractors::BsoBody};
 
 lazy_static! {
     static ref SERVER_LIMITS: Arc<ServerLimits> = Arc::new(ServerLimits::default());
@@ -127,23 +123,21 @@ async fn get_test_state(settings: &Settings) -> ServerState {
         gcs_payload_offload_collections: Arc::new(
             settings.syncstorage.gcs_payload_offload_collections.clone(),
         ),
-        gcs_client: match settings.syncstorage.gcs_payload_bucket {
-            Some(_) => Some(
-                build_client(settings.syncstorage.gcs_endpoint.as_deref())
-                    .await
-                    .expect("Could not build GCS client in get_test_state"),
-            ),
-            None => None,
+        jwks_url: format!(
+            "{}{}",
+            settings.tokenserver.fxa_oauth_server_url.trim_end_matches('/'),
+            "/realms/kagi/protocol/openid-connect/certs",
+        ),
+        gcs_endpoint: settings.syncstorage.gcs_endpoint.clone(),
+        email_domain: settings.tokenserver.fxa_email_domain.clone(),
+        oauth_request_timeout: 10,
+        oauth_verifier: {
+            let jwk_verifiers: Vec<JWTVerifierImpl> = Vec::new();
+            RefCell::new(Box::new(
+                oauth::Verifier::new(jwk_verifiers)
+                    .expect("Could not create oauth verifier in get_test_state"),
+            ))
         },
-        gcs_control_client: match settings.syncstorage.gcs_payload_bucket {
-            Some(_) => Some(
-                build_control_client(settings.syncstorage.gcs_endpoint.as_deref())
-                    .await
-                    .expect("Could not build GCS control client in get_test_state"),
-            ),
-            None => None,
-        },
-        gcs_payload_max_concurrency: settings.syncstorage.gcs_payload_max_concurrency,
     }
 }
 
@@ -159,7 +153,6 @@ macro_rules! init_app {
             crate::logging::init_logging(false).unwrap();
             let limits = Arc::new($settings.syncstorage.limits.clone());
             let state = get_test_state(&$settings).await;
-            let metrics = state.metrics.clone();
             test::init_service(build_app!(
                 state,
                 None::<tokenserver::ServerState>,
@@ -280,7 +273,6 @@ where
     let settings = get_test_settings();
     let limits = Arc::new(settings.syncstorage.limits.clone());
     let state = get_test_state(&settings).await;
-    let metrics = state.metrics.clone();
     let app = test::init_service(build_app!(
         state,
         None::<tokenserver::ServerState>,
@@ -324,7 +316,6 @@ async fn test_endpoint_with_body(
     let settings = get_test_settings();
     let limits = Arc::new(settings.syncstorage.limits.clone());
     let state = get_test_state(&settings).await;
-    let metrics = state.metrics.clone();
     let app = test::init_service(build_app!(
         state,
         None::<tokenserver::ServerState>,
@@ -1001,102 +992,26 @@ async fn put_bso_offloads_to_gcs() {
     );
 }
 
-#[actix_rt::test]
-async fn post_collection_offloads_to_gcs() {
-    let mut settings = get_test_settings();
-    if !settings.syncstorage.uses_spanner() {
-        // TODO: should be Spanner only (for now)
-        return;
-    }
-
-    // Mock GCS: expect one multipart upload per BSO in the batch. `times(3)` asserts all three
-    // BSOs were uploaded.
-    const BSO_COUNT: usize = 3;
-    let server = Server::run();
-    server.expect(
-        Expectation::matching(all_of![
-            request::method_path("POST", "/upload/storage/v1/b/test-bucket/o"),
-            request::query(url_decoded(contains(("uploadType", "multipart")))),
-            request::body(matches(r#""committed""#)),
-            request::body(matches(r#""false""#)),
-            request::body(matches(r#""customTime""#)),
-        ])
-        .times(BSO_COUNT)
-        .respond_with(
-            status_code(200)
-                .append_header("content-type", "application/json")
-                .body(
-                    serde_json::json!({
-                        "name": "test-object",
-                        "bucket": "test-bucket",
-                    })
-                    .to_string(),
-                ),
-        ),
-    );
-
-    settings.syncstorage.gcs_payload_bucket = Some("test-bucket".to_owned());
-    settings.syncstorage.gcs_payload_offload_collections = vec!["bookmarks".to_owned()];
-    settings.syncstorage.gcs_endpoint = Some(format!("http://{}", server.addr()));
-
-    let app = init_app!(settings).await;
-
-    let body = json!(
-        (0..BSO_COUNT)
-            .map(|i| json!({ "id": format!("bso{i}"), "payload": format!("payload-{i}") }))
-            .collect::<Vec<_>>()
-    );
-    let req = create_request(
-        http::Method::POST,
-        "/1.5/42/storage/bookmarks",
-        None,
-        Some(body),
-    )
-    .to_request();
-    let resp = app
-        .call(req)
-        .await
-        .expect("Could not get resp in post_collection_offloads_to_gcs");
-    assert!(
-        resp.response().status().is_success(),
-        "post_collection failed: {:?}",
-        resp.response()
-    );
-}
-
-fn limits_with_override(name: &str, override_: CollectionLimitOverride) -> ServerLimits {
+fn limits_with_override(name: &str, max_record_payload_bytes: u32) -> ServerLimits {
     let mut limits = ServerLimits::default();
-    limits.collections.insert(name.to_owned(), override_);
+    limits.collections.insert(
+        name.to_owned(),
+        syncstorage_settings::CollectionLimitOverride {
+            max_record_payload_bytes: Some(max_record_payload_bytes),
+        },
+    );
     limits
 }
 
 #[::core::prelude::v1::test]
 fn limits_json_advertises_collection_overrides() {
-    let limits = limits_with_override(
-        "newtab-images",
-        CollectionLimitOverride {
-            max_record_payload_bytes: Some(20_971_520),
-            max_post_bytes: Some(26_214_400),
-            max_request_bytes: Some(26_218_496),
-        },
-    );
+    let limits = limits_with_override("newtab-images", 20_971_520);
     let json: Value = serde_json::from_str(&build_limits_json(&limits)).unwrap();
     assert_eq!(
         json["collections"]["newtab-images"]["max_record_payload_bytes"],
         json!(20_971_520)
     );
-    assert_eq!(
-        json["collections"]["newtab-images"]["max_post_bytes"],
-        json!(26_214_400)
-    );
-    assert_eq!(
-        json["collections"]["newtab-images"]["max_request_bytes"],
-        json!(26_218_496)
-    );
-    // Global (default) fields are still advertised alongside the override map.
     assert!(json.get("max_record_payload_bytes").is_some());
-    assert!(json.get("max_post_bytes").is_some());
-    assert!(json.get("max_request_bytes").is_some());
 }
 
 #[::core::prelude::v1::test]
