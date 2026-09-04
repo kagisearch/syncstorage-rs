@@ -55,7 +55,7 @@ impl JwtWorker {
             .collect()
     }
 
-    pub async fn verify_token(&self, state: &crate::server::ServerState, token: &Vec<u8>, metrics: &Metrics) -> Result<VerifyOutput, TokenserverError> {
+    pub async fn verify_token(&self, state: &crate::server::ServerState, token: &String, metrics: &Metrics) -> Result<VerifyOutput, TokenserverError> {
         if !state.oauth_verifier.borrow().is_valid() {
             let verifiers = 
                 match self.get_remote_jwks(&state).await {

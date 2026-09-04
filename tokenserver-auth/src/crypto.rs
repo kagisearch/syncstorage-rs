@@ -1,3 +1,4 @@
+
 use hkdf::Hkdf;
 use hmac::{Hmac, KeyInit, Mac};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, errors::ErrorKind, jwk::Jwk};
@@ -75,7 +76,7 @@ impl Crypto for CryptoImpl {
 
 /// JWTVerifyError captures the errors possible while verifying a JWT
 #[derive(Debug, thiserror::Error)]
-pub enum JWTVerifyError {
+pub enum JWTVerifyErrorKind {
     #[error("The signature has expired")]
     ExpiredSignature,
     #[error("Untrusted token")]
@@ -88,29 +89,49 @@ pub enum JWTVerifyError {
     InvalidSignature,
 }
 
+pub struct JWTVerifyError {
+    pub kind: JWTVerifyErrorKind,
+    pub description : String,
+}
+
 impl JWTVerifyError {
     pub fn metric_label(&self) -> &'static str {
-        match self {
-            Self::ExpiredSignature => "jwt.error.expired_signature",
-            Self::TrustError => "jwt.error.trust_error",
-            Self::InvalidKey => "jwt.error.invalid_key",
-            Self::InvalidSignature => "jwt.error.invalid_signature",
-            Self::DecodingError => "jwt.error.decoding_error",
+        match self.kind {
+            JWTVerifyErrorKind::ExpiredSignature => "jwt.error.expired_signature",
+            JWTVerifyErrorKind::TrustError => "jwt.error.trust_error",
+            JWTVerifyErrorKind::InvalidKey => "jwt.error.invalid_key",
+            JWTVerifyErrorKind::InvalidSignature => "jwt.error.invalid_signature",
+            JWTVerifyErrorKind::DecodingError => "jwt.error.decoding_error",
         }
     }
 
     pub fn is_reportable_err(&self) -> bool {
-        matches!(self, Self::InvalidKey | Self::DecodingError)
+        matches!(self.kind, JWTVerifyErrorKind::InvalidKey | JWTVerifyErrorKind::DecodingError)
+    }
+}
+
+impl std::fmt::Display for JWTVerifyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "JWTVerifyError: kind={:?}, description={}", self.kind, self.description)
+    }
+}
+
+impl std::fmt::Debug for JWTVerifyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "JWTVerifyError: kind={:?}, description={}", self.kind, self.description)
     }
 }
 
 impl From<jsonwebtoken::errors::Error> for JWTVerifyError {
     fn from(value: jsonwebtoken::errors::Error) -> Self {
-        match value.kind() {
-            ErrorKind::InvalidKeyFormat => JWTVerifyError::InvalidKey,
-            ErrorKind::InvalidSignature => JWTVerifyError::InvalidSignature,
-            ErrorKind::ExpiredSignature => JWTVerifyError::ExpiredSignature,
-            _ => JWTVerifyError::DecodingError,
+        Self {
+            kind: match value.kind() {
+                ErrorKind::InvalidKeyFormat => JWTVerifyErrorKind::InvalidKey,
+                ErrorKind::InvalidSignature => JWTVerifyErrorKind::InvalidSignature,
+                ErrorKind::ExpiredSignature => JWTVerifyErrorKind::ExpiredSignature,
+                _ => JWTVerifyErrorKind::DecodingError,
+            },
+            description: format!("Error decoding JWT: {:?}", value),
         }
     }
 }
@@ -119,7 +140,7 @@ impl From<jsonwebtoken::errors::Error> for JWTVerifyError {
 pub trait JWTVerifier: TryFrom<Self::Key, Error = JWTVerifyError> + Sync + Send + Clone {
     type Key: DeserializeOwned;
 
-    fn verify<T: DeserializeOwned>(&self, token: &Vec<u8>) -> Result<T, JWTVerifyError>;
+    fn verify<T: DeserializeOwned>(&self, token: &String) -> Result<T, JWTVerifyError>;
 }
 
 /// An implementation of the JWT verifier using the jsonwebtoken crate
@@ -132,13 +153,21 @@ pub struct JWTVerifierImpl {
 impl JWTVerifier for JWTVerifierImpl {
     type Key = Jwk;
 
-    fn verify<T: DeserializeOwned>(&self, token: &Vec<u8>) -> Result<T, JWTVerifyError> {
-        let token_data = jsonwebtoken::decode::<T>(token, &self.key, &self.validation)?;
+    fn verify<T: DeserializeOwned>(&self, token: &String) -> Result<T, JWTVerifyError> {
+        let token_data = match jsonwebtoken::decode::<T>(token, &self.key, &self.validation) {
+            Ok(data) => data,
+            Err(e) => {
+                return Err(JWTVerifyError::from(e));
+            }
+        };
         token_data
             .header
             .typ
-            .ok_or(JWTVerifyError::TrustError)
-            .and_then(|typ| {
+            .ok_or(JWTVerifyError {
+                        kind: JWTVerifyErrorKind::DecodingError,
+                        description: "Missing typ header".to_string(),
+                    })
+            .and_then(|typ| {   
                 // Ref https://tools.ietf.org/html/rfc7515#section-4.1.9 the `typ` header
                 // is lowercase and has an implicit default `application/` prefix.
                 let typ = if !typ.contains('/') {
@@ -147,7 +176,10 @@ impl JWTVerifier for JWTVerifierImpl {
                     typ
                 };
                 if typ.to_lowercase() != "application/at+jwt" {
-                    return Err(JWTVerifyError::TrustError);
+                    return Err(JWTVerifyError {
+                        kind: JWTVerifyErrorKind::DecodingError,
+                        description: format!("Invalid typ header: {}", typ),
+                    });
                 }
                 Ok(typ)
             })?;
@@ -158,7 +190,10 @@ impl JWTVerifier for JWTVerifierImpl {
 impl TryFrom<Jwk> for JWTVerifierImpl {
     type Error = JWTVerifyError;
     fn try_from(value: Jwk) -> Result<Self, Self::Error> {
-        let decoding_key = DecodingKey::from_jwk(&value).map_err(|_| JWTVerifyError::InvalidKey)?;
+        let decoding_key = DecodingKey::from_jwk(&value).map_err(|_| JWTVerifyError {
+            kind: JWTVerifyErrorKind::InvalidKey,
+            description: "Invalid key".to_string(),
+        })?;
         let mut validation = Validation::new(Algorithm::RS256);
         // The FxA OAuth ecosystem currently doesn't make good use of aud, and
         // instead relies on scope for restricting which services can accept
@@ -212,7 +247,10 @@ pub struct SETVerifierImpl {
 
 impl SETVerifierImpl {
     pub fn new(jwk: &Jwk, client_id: &str, issuer_url: &str) -> Result<Self, JWTVerifyError> {
-        let decoding_key = DecodingKey::from_jwk(jwk).map_err(|_| JWTVerifyError::InvalidKey)?;
+        let decoding_key = DecodingKey::from_jwk(jwk).map_err(|_| JWTVerifyError {
+            kind: JWTVerifyErrorKind::InvalidKey,
+            description: "Invalid key".to_string(),
+        })?;
         let mut validation = Validation::new(Algorithm::RS256);
         validation.set_audience(&[client_id]);
         validation.set_issuer(&[issuer_url]);
@@ -224,7 +262,7 @@ impl SETVerifierImpl {
         })
     }
 
-    pub fn verify<T: DeserializeOwned>(&self, token: &Vec<u8>) -> Result<T, JWTVerifyError> {
+    pub fn verify<T: DeserializeOwned>(&self, token: &String) -> Result<T, JWTVerifyError> {
         let token_data = jsonwebtoken::decode::<T>(token, &self.key, &self.validation)?;
         Ok(token_data.claims)
     }

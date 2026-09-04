@@ -51,8 +51,8 @@ pub const ONE_KB: f64 = 1024.0;
     )
 )]
 pub async fn get_collections(
-    db_pool: DbTransactionPool,
     meta: JwtAuthData,
+    db_pool: DbTransactionPool,
     request: HttpRequest,
     state: Data<ServerState>,
 ) -> Result<HttpResponse, ApiError> {

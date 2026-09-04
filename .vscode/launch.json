@@ -8,7 +8,10 @@
             "type": "lldb",
             "request": "launch",
             "name": "Launch rs-syncserver",
-            "args": ["--config", "config/local.toml"],
+            "args": [
+                "--config",
+                "config/local.toml"
+            ],
             "console": "integratedTerminal",
             "env": {
                 "RUST_BACKTRACE": "full",
@@ -30,13 +33,13 @@
             "type": "lldb",
             "request": "attach",
             "name": "Attach to rs-syncserver",
-            "program": "${workspaceFolder}/target/debug/syncserver", 
+            "program": "${workspaceFolder}/target/debug/syncserver",
         },
         {
             "type": "lldb",
             "request": "attach",
             "name": "Attach to PID syncserver",
-            "pid": "${input:syncserverPID}" 
+            "pid": "${input:syncserverPID}"
         },
         {
             "name": "Debug unit tests in library 'syncserver_common'",
@@ -289,14 +292,14 @@
     ],
     "inputs": [
         {
-          "id": "syncserverPID",
-          "type": "command",
-          "command": "shellCommand.execute",
-          "args": {
-            "command": "ps -A | grep '[s]yncserver' | awk '{print $1}'",
-            "description": "Select syncserver PID",
-            "useFirstResult": true,
-          }
+            "id": "syncserverPID",
+            "type": "command",
+            "command": "shellCommand.execute",
+            "args": {
+                "command": "ps -A | grep '[s]yncserver' | awk '{print $1}'",
+                "description": "Select syncserver PID",
+                "useFirstResult": true,
+            }
         }
     ]
 }

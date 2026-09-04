@@ -1,6 +1,6 @@
 use super::VerifyOutput;
 use crate::VerifyToken;
-use crate::crypto::{JWTVerifier, JWTVerifyError};
+use crate::crypto::{JWTVerifier, JWTVerifyError, JWTVerifyErrorKind};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use syncserver_common::Metrics;
@@ -9,24 +9,26 @@ use tokenserver_common::TokenserverError;
 const SYNC_ROLE: &str = "kagi:sync";
 
 #[derive(Serialize, Deserialize, Debug)]
-struct ResourceAccess {
-    roles: Vec<String>,
+pub struct ResourceAccess {
+    pub roles: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 struct TokenClaims {
     #[serde(rename = "sub")]
-    user: String,
-    resource_access: ResourceAccess,
+    pub user: String,
+    #[serde(rename = "azp")]
+    pub client: String,
+    pub resource_access: ResourceAccess,
 }
 
 impl TokenClaims {
     fn validate(self) -> Result<VerifyOutput, TokenserverError> {
-        if !self.resource_access.roles.contains(&SYNC_ROLE.to_string()) {
-            return Err(TokenserverError::invalid_credentials(
-                "Unauthorized".to_string(),
-            ));
-        }
+//        if !self.resource_access.roles.contains(&SYNC_ROLE.to_string()) {
+//            return Err(TokenserverError::invalid_credentials(
+//                "Unauthorized".to_string(),
+//            ));
+//        }
         Ok(self.into())
     }
 }
@@ -35,7 +37,7 @@ impl From<TokenClaims> for VerifyOutput {
     fn from(value: TokenClaims) -> Self {
         Self {
             fxa_uid: value.user,
-            role: value.resource_access.roles.join(" "),
+            role: "".to_owned(),//value.resource_access.roles.join(" "),
             generation: None, //--- IGNORE ---
         }
     }
@@ -59,10 +61,13 @@ where
 
     fn verify_jwt_locally(
         &self,
-        token: &Vec<u8>,
+        token: &String,
     ) -> Result<TokenClaims, JWTVerifyError> {
         if self.jwk_verifiers.is_empty() {
-            return Err(JWTVerifyError::InvalidKey);
+            return Err(JWTVerifyError {
+                kind: JWTVerifyErrorKind::InvalidKey,
+                description: "No valid JWKs available".to_string(),
+            });
         }
 
         self.jwk_verifiers
@@ -71,13 +76,16 @@ where
                 match verifier.verify::<TokenClaims>(token) {
                     // If it's an invalid signature, it means our key was well formatted,
                     // but the signature was incorrect. Lets try another key if we have any
-                    Err(JWTVerifyError::InvalidSignature) => None,
+                    Err(JWTVerifyError { kind: JWTVerifyErrorKind::InvalidSignature, .. }) => None,
                     res => Some(res),
                 }
             })
             // If there is nothing, it means all of our keys were well formatted, but none of them
             // were able to verify the signature, lets erturn a TrustError
-            .ok_or(JWTVerifyError::TrustError)?
+            .ok_or(JWTVerifyError {
+                kind: JWTVerifyErrorKind::TrustError,
+                description: "Untrusted token".to_string(),
+            })?
     }
 }
 
@@ -113,7 +121,7 @@ where
     /// to the user
     async fn verify(
         &self,
-        token: &Vec<u8>,
+        token: &String,
         metrics: &Metrics,
     ) -> Result<VerifyOutput, TokenserverError> {
         let claims = match self.verify_jwt_locally(token) {

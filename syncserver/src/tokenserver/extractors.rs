@@ -24,7 +24,7 @@ use serde::Deserialize;
 use sha2::Sha256;
 use syncserver_common::Taggable;
 use syncserver_settings::Secrets;
-use tokenserver_auth::{FxaWebhookClaims, JWTVerifyError};
+use tokenserver_auth::{FxaWebhookClaims, crypto::JWTVerifyErrorKind};
 use tokenserver_common::{ErrorLocation, NodeType, TokenserverError};
 use tokenserver_db::{Db, DbPool, SYNC_SERVICE_NAME, params, results};
 
@@ -347,7 +347,7 @@ impl FromRequest for DbPoolWrapper {
 /// An authentication token as parsed from the `Authorization` header.
 /// Signed JWTs can be verified locally or via FxA.
 pub enum Token {
-    JWT(Vec<u8>),
+    JWT(String),
 }
 
 impl FromRequest for Token {
@@ -383,18 +383,7 @@ impl FromRequest for Token {
                 let auth_type = auth_type.to_ascii_lowercase();
 
                 if auth_type == "bearer" {
-                    let out = match base64::engine::general_purpose::STANDARD.decode(token) {
-                        Ok(out) => out,
-                        Err(e) => {
-                            return Err(TokenserverError {
-                                description: "Unauthorized".to_owned(),
-                                location: ErrorLocation::Body,
-                                context: format!("Invalid base64 encoding in Authorization header: {}", e),
-                                ..Default::default()
-                            });
-                        }
-                    };
-                    Ok(Token::JWT(out.to_owned()))
+                    Ok(Token::JWT(token.to_owned()))
                 } else {
                     // The request must use a Bearer token
                     Err(TokenserverError {
@@ -646,12 +635,18 @@ impl FromRequest for FxaWebhookToken {
             for verifier in &state.set_verifiers {
                 match verifier.verify::<FxaWebhookClaims>(&token) {
                     Ok(claims) => return Ok(FxaWebhookToken(claims)),
-                    Err(JWTVerifyError::InvalidSignature) => continue,
                     Err(e) => {
-                        return Err(TokenserverError {
-                            context: format!("SET verification failed: {}", e),
-                            ..TokenserverError::invalid_credentials("Unauthorized".to_owned())
-                        });
+                        match e.kind {
+                            JWTVerifyErrorKind::InvalidSignature => {
+                                continue;
+                            }
+                            _ => {
+                                return Err(TokenserverError {
+                                    context: format!("SET verification failed: {}", e),
+                                    ..TokenserverError::invalid_credentials("Unauthorized".to_owned())
+                                });
+                            }
+                        }
                     }
                 }
             }

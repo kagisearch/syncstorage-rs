@@ -1,5 +1,5 @@
 #[allow(dead_code)]
-mod crypto;
+pub mod crypto;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_utils;
 
@@ -66,7 +66,7 @@ pub trait VerifyToken<P>: DynClone + Sync + Send {
     /// making a request to a remote server.
     async fn verify(
         &self,
-        token: &Vec<u8>,
+        token: &String,
         metrics: &Metrics,
     ) -> Result<Self::Output, TokenserverError>;
 }
@@ -90,7 +90,7 @@ impl<T: Clone + Send + Sync> VerifyToken<JWTVerifierImpl> for MockVerifier<T> {
 
     }
 
-    async fn verify(&self, _token: &Vec<u8>, _metrics: &Metrics) -> Result<T, TokenserverError> {
+    async fn verify(&self, _token: &String, _metrics: &Metrics) -> Result<T, TokenserverError> {
         self.valid
             .then(|| self.verify_output.clone())
             .ok_or_else(|| TokenserverError::invalid_credentials("Unauthorized".to_owned()))
