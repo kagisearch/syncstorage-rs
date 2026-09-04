@@ -175,7 +175,7 @@ impl JWTVerifier for JWTVerifierImpl {
                 } else {
                     typ
                 };
-                if typ.to_lowercase() != "application/at+jwt" {
+                if typ.to_lowercase() != "application/jwt" {
                     return Err(JWTVerifyError {
                         kind: JWTVerifyErrorKind::DecodingError,
                         description: format!("Invalid typ header: {}", typ),

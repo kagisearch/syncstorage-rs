@@ -14,7 +14,8 @@ pub struct ResourceAccess {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-struct TokenClaims {
+#[serde(rename_all = "snake_case")]
+pub struct TokenClaims {
     #[serde(rename = "sub")]
     pub user: String,
     #[serde(rename = "azp")]
@@ -24,11 +25,11 @@ struct TokenClaims {
 
 impl TokenClaims {
     fn validate(self) -> Result<VerifyOutput, TokenserverError> {
-//        if !self.resource_access.roles.contains(&SYNC_ROLE.to_string()) {
-//            return Err(TokenserverError::invalid_credentials(
-//                "Unauthorized".to_string(),
-//            ));
-//        }
+        if !self.resource_access.roles.contains(&SYNC_ROLE.to_string()) {
+            return Err(TokenserverError::invalid_credentials(
+                "Unauthorized".to_string(),
+            ));
+        }
         Ok(self.into())
     }
 }
