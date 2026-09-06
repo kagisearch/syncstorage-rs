@@ -177,6 +177,7 @@ impl ValidationError {
         match &self.kind {
             ValidationErrorKind::FromDetails(.., metric_label)
             | ValidationErrorKind::FromValidationErrors(.., metric_label) => *metric_label,
+            ValidationErrorKind::FromCustomJsonError => None,
         }
     }
 
@@ -203,6 +204,7 @@ impl ValidationError {
                     WeaveError::UnknownError
                 }
             }
+            ValidationErrorKind::FromCustomJsonError => WeaveError::UnknownError,
         }
     }
 }
@@ -224,6 +226,9 @@ pub enum ValidationErrorKind {
         RequestErrorLocation,
         Option<&'static str>,
     ),
+
+    #[error("Custom JSON error")]
+    FromCustomJsonError,
 }
 
 impl_fmt_display!(HawkError, HawkErrorKind);
@@ -359,6 +364,14 @@ impl Serialize for ValidationErrorKind {
                         })?;
                     }
                 }
+            }
+            ValidationErrorKind::FromCustomJsonError => {
+                seq.serialize_element(&SerializedValidationError {
+                    description: "Custom JSON error",
+                    location: &RequestErrorLocation::Body,
+                    name: None,
+                    value: None,
+                })?;
             }
         }
 

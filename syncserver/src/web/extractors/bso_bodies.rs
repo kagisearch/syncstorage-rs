@@ -78,20 +78,9 @@ impl FromRequest for BsoBodies {
             .into()
         });
 
-        // Avoid duplicating by defining our error func now, doesn't need the box wrapper
-        fn make_error() -> Error {
-            ValidationErrorKind::FromDetails(
-                "Invalid JSON in request body".to_owned(),
-                RequestErrorLocation::Body,
-                Some("bsos".to_owned()),
-                Some("request.validate.invalid_body_json"),
-            )
-            .into()
-        }
-
         // Define a new bool to check from a static closure to release the reference on the
         // content_type header
-        let newlines: bool = content_type == "application/newlines";
+        let newlines: bool = content_type == "application/x-ndjson";
 
         // Grab the max sizes
         let state = match req.app_data::<Data<ServerState>>() {
@@ -123,25 +112,41 @@ impl FromRequest for BsoBodies {
         } as usize;
         let max_post_bytes = state.limits.max_post_bytes as usize;
 
+        // Avoid duplicating by defining our error func now, doesn't need the box wrapper
+        fn make_error(e:serde_json::Error) -> Error {
+            ValidationErrorKind::FromDetails(
+                format!("Invalid JSON in request body: {}", e),
+                RequestErrorLocation::Body,
+                Some("bsos".to_owned()),
+                Some("request.validate.invalid_body_json"),
+            )
+            .into()
+        }
+
         let fut = fut.and_then(move |body| {
             // Get all the raw / values
             let bsos: Vec<Value> = if newlines {
                 let mut bsos = Vec::new();
                 for item in body.lines() {
                     // Check that its a valid JSON map like we expect
-                    if let Ok(raw_json) = serde_json::from_str::<Value>(item) {
-                        bsos.push(raw_json);
-                    } else {
-                        // Per Python version, BSO's must json deserialize
-                        return future::err(make_error());
-                    }
+                    match serde_json::from_str::<Value>(&item) {
+                        Ok(vals) => bsos.push(vals),
+                        Err(e) => {
+                            // Per Python version, BSO's must json deserialize
+                            return future::err(make_error(e));
+                        }
+                    };
                 }
                 bsos
-            } else if let Ok(json_vals) = serde_json::from_str::<Vec<Value>>(&body) {
-                json_vals
             } else {
-                // Per Python version, BSO's must json deserialize
-                return future::err(make_error());
+                let json_vals = match serde_json::from_str::<Vec<Value>>(&body) {
+                    Ok(vals) => vals,
+                    Err(e) => {
+                        // Per Python version, BSO's must json deserialize
+                        return future::err(make_error(e));
+                    }
+                };
+                json_vals
             };
 
             // Validate all the BSO's, move invalid to our other list. Assume they'll all make
@@ -161,7 +166,7 @@ impl FromRequest for BsoBodies {
             for bso in bsos {
                 // Error out if its not a JSON mapping type
                 if !bso.is_object() {
-                    return future::err(make_error());
+                    return future::err(ValidationErrorKind::FromCustomJsonError.into());
                 }
                 // Save all id's we get, check for missing id, or duplicate.
                 let bso_id = if let Some(id) = bso.get("id").and_then(serde_json::Value::as_str) {

@@ -140,10 +140,10 @@ impl TokenserverError {
         }
     }
 
-    pub fn resource_unavailable() -> Self {
+    pub fn resource_unavailable(descr:String) -> Self {
         Self {
             location: ErrorLocation::Body,
-            description: "Resource is not available".to_owned(),
+            description: descr,
             http_status: StatusCode::SERVICE_UNAVAILABLE,
             context: "Resource is not available".to_owned(),
             ..Self::default()
@@ -152,9 +152,8 @@ impl TokenserverError {
 
     pub fn oauth_timeout() -> Self {
         Self {
-            context: "OAuth verification timeout".to_owned(),
             tags: Some(vec![("reason", "oauth_verify_timeout".to_owned())]),
-            ..Self::resource_unavailable()
+            ..Self::resource_unavailable("OAuth verification timeout".to_owned())
         }
     }
 
@@ -335,8 +334,7 @@ mod tests {
     #[test]
     fn sentry_event() {
         let err = TokenserverError {
-            context: "OAuth verification timeout".to_owned(),
-            ..TokenserverError::resource_unavailable()
+            ..TokenserverError::resource_unavailable("OAuth verification timeout".to_owned())
         };
         let exc = exception_from_reportable_error(&err);
         assert_eq!(exc.ty, "TokenserverError");

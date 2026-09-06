@@ -1,4 +1,4 @@
-use super::{MetaRequest, JwtAuthData};
+use super::auth_request::{JwtAuthData};
 
 pub trait EmitApiMetric {
     fn emit_api_metric(&self, label: &str);
@@ -19,4 +19,3 @@ macro_rules! impl_emit_api_metric {
 }
 
 impl_emit_api_metric!(JwtAuthData);
-impl_emit_api_metric!(MetaRequest);

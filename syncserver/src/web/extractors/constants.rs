@@ -10,8 +10,8 @@ pub const BSO_MAX_TTL: u32 = 999_999_999;
 pub const BSO_MAX_SORTINDEX_VALUE: i32 = 999_999_999;
 pub const BSO_MIN_SORTINDEX_VALUE: i32 = -999_999_999;
 
-pub const ACCEPTED_CONTENT_TYPES: [&str; 3] =
-    ["application/json", "text/plain", "application/newlines"];
+pub const ACCEPTED_CONTENT_TYPES: [&str; 4] =
+    ["application/json", "application/x-ndjson", "text/plain", "application/newlines"];
 
 lazy_static! {
     pub static ref KNOWN_BAD_PAYLOAD_REGEX: Regex =

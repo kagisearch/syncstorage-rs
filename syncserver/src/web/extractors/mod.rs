@@ -46,8 +46,8 @@ mod collection_post_request;
 pub(crate) use collection_post_request::*;
 mod heartbeat_request;
 pub(crate) use heartbeat_request::*;
-mod meta_request;
-pub(crate) use meta_request::*;
+mod auth_request;
+pub(crate) use auth_request::*;
 mod test_error_request;
 pub(crate) use test_error_request::*;
 

@@ -25,7 +25,7 @@ use crate::{
     web::{
         extractors::{
             BsoPutRequest, BsoRequest, CollectionPostRequest, CollectionRequest, EmitApiMetric,
-            HeartbeatRequest, MetaRequest, ReplyFormat, TestErrorRequest, JwtAuthData,
+            HeartbeatRequest, ReplyFormat, TestErrorRequest, JwtAuthData,
         },
         payload_offload::{download_payload, offload_bucket, upload_payload},
         transaction::DbTransactionPool,
@@ -51,14 +51,14 @@ pub const ONE_KB: f64 = 1024.0;
     )
 )]
 pub async fn get_collections(
-    meta: JwtAuthData,
+    auth_data: JwtAuthData,
     db_pool: DbTransactionPool,
     request: HttpRequest,
     state: Data<ServerState>,
 ) -> Result<HttpResponse, ApiError> {
     db_pool
-        .transaction_http(&request, &meta.user_id, async |user_id, db| {
-            //meta.emit_api_metric("request.get_collections");
+        .transaction_http(&request, &auth_data.user_id, async |user_id, db| {
+            //auth_data.emit_api_metric("request.get_collections");
             if state.glean_enabled {
                 // Values below are be passed to the Glean logic to emit metrics.
                 // This is used to measure DAU (Daily Active Use) of Sync.
@@ -107,13 +107,13 @@ pub async fn get_collections(
     )
 )]
 pub async fn get_collection_counts(
-    meta: MetaRequest,
+    auth_data: JwtAuthData,
     db_pool: DbTransactionPool,
     request: HttpRequest,
 ) -> Result<HttpResponse, ApiError> {
     db_pool
-        .transaction_http(&request, &meta.user_id, async |user_id, db| {
-            meta.emit_api_metric("request.get_collection_counts");
+        .transaction_http(&request, &auth_data.user_id, async |user_id, db| {
+            auth_data.emit_api_metric("request.get_collection_counts");
             let result = db.get_collection_counts(user_id.to_owned()).await?;
 
             Ok(HttpResponse::build(StatusCode::OK)
@@ -138,13 +138,13 @@ pub async fn get_collection_counts(
     )
 )]
 pub async fn get_collection_usage(
-    meta: MetaRequest,
+    auth_data: JwtAuthData,
     db_pool: DbTransactionPool,
     request: HttpRequest,
 ) -> Result<HttpResponse, ApiError> {
     db_pool
-        .transaction_http(&request, &meta.user_id, async |user_id, db| {
-            meta.emit_api_metric("request.get_collection_usage");
+        .transaction_http(&request, &auth_data.user_id, async |user_id, db| {
+            auth_data.emit_api_metric("request.get_collection_usage");
             let usage: HashMap<_, _> = db
                 .get_collection_usage(user_id.to_owned())
                 .await?
@@ -174,13 +174,13 @@ pub async fn get_collection_usage(
     )
 )]
 pub async fn get_quota(
-    meta: MetaRequest,
+    auth_data: JwtAuthData,
     db_pool: DbTransactionPool,
     request: HttpRequest,
 ) -> Result<HttpResponse, ApiError> {
     db_pool
-        .transaction_http(&request, &meta.user_id, async |user_id, db| {
-            meta.emit_api_metric("request.get_quota");
+        .transaction_http(&request, &auth_data.user_id, async |user_id, db| {
+            auth_data.emit_api_metric("request.get_quota");
             let usage = db.get_storage_usage(user_id.to_owned()).await?;
             Ok(HttpResponse::Ok().json(vec![Some(usage as f64 / ONE_KB), None]))
         })
@@ -202,13 +202,13 @@ pub async fn get_quota(
     )
 )]
 pub async fn delete_all(
-    meta: MetaRequest,
+    auth_data: JwtAuthData,
     db_pool: DbTransactionPool,
     request: HttpRequest,
 ) -> Result<HttpResponse, ApiError> {
     db_pool
-        .transaction_http(&request, &meta.user_id, async |user_id, db| {
-            meta.emit_api_metric("request.delete_all");
+        .transaction_http(&request, &auth_data.user_id, async |user_id, db| {
+            auth_data.emit_api_metric("request.delete_all");
             Ok(HttpResponse::Ok().json(db.delete_storage(user_id.to_owned()).await?))
         })
         .await
@@ -231,16 +231,16 @@ pub async fn delete_all(
     )
 )]
 pub async fn delete_collection(
-    meta: MetaRequest,
+    auth_data: JwtAuthData,
     coll: CollectionRequest,
     db_pool: DbTransactionPool,
     request: HttpRequest,
 ) -> Result<HttpResponse, ApiError> {
     db_pool
-        .transaction_http(&request, &meta.user_id, async |user_id,db| {
+        .transaction_http(&request, &auth_data.user_id, async |user_id,db| {
             let delete_bsos = !coll.query.ids.is_empty();
             let timestamp = if delete_bsos {
-                meta.emit_api_metric("request.delete_bsos");
+                auth_data.emit_api_metric("request.delete_bsos");
                 db.delete_bsos(params::DeleteBsos {
                     user_id: user_id.clone(),
                     collection: coll.collection.clone(),
@@ -248,7 +248,7 @@ pub async fn delete_collection(
                 })
                 .await
             } else {
-                meta.emit_api_metric("request.delete_collection");
+                auth_data.emit_api_metric("request.delete_collection");
                 db.delete_collection(params::DeleteCollection {
                     user_id: user_id.clone(),
                     collection: coll.collection.clone(),
@@ -300,14 +300,14 @@ pub async fn delete_collection(
     )
 )]
 pub async fn get_collection(
-    meta: JwtAuthData,
+    auth_data: JwtAuthData,
     coll: CollectionRequest,
     db_pool: DbTransactionPool,
     state: Data<ServerState>,
     request: HttpRequest,
 ) -> Result<HttpResponse, ApiError> {
     let params = params::GetBsos {
-        user_id: meta.user_id.clone(),
+        user_id: auth_data.user_id.clone(),
         newer: coll.query.newer,
         older: coll.query.older,
         sort: coll.query.sort,
@@ -320,8 +320,8 @@ pub async fn get_collection(
 
     if !coll.query.full {
         return db_pool
-            .transaction_http(&request, &meta.user_id, async |_user_id, db| {
-                meta.emit_api_metric("request.get_collection");
+            .transaction_http(&request, &auth_data.user_id, async |_user_id, db| {
+                auth_data.emit_api_metric("request.get_collection");
                 // Changed to be a Paginated list of BSOs, need to extract IDs from them.
                 let ids = handle_not_found(db.get_bso_ids(params).await)?;
                 Ok(finish_get_collection(&coll, ids).await)
@@ -334,9 +334,9 @@ pub async fn get_collection(
     db_pool
         .transaction_http_then(
             &request,
-            &meta.user_id,
+            &auth_data.user_id,
             async |db| {
-                meta.emit_api_metric("request.get_collection");
+                auth_data.emit_api_metric("request.get_collection");
                 handle_not_found(db.get_bsos(params).await).map_err(Into::into)
             },
             async |mut bsos: Paginated<results::GetBso>| {
@@ -410,7 +410,7 @@ where
     )
 )]
 pub async fn post_collection(
-    meta: JwtAuthData,
+    auth_data: JwtAuthData,
     mut coll: CollectionPostRequest,
     db_pool: DbTransactionPool,
     state: Data<ServerState>,
@@ -430,7 +430,7 @@ pub async fn post_collection(
                 let url = upload_payload(
                     &state,
                     bucket,
-                    &meta.user_id,
+                    &auth_data.user_id,
                     &coll.collection,
                     &bso.id,
                     payload,
@@ -443,10 +443,10 @@ pub async fn post_collection(
         }
     }
 
-    let user_id = meta.user_id.to_owned(); 
+    let user_id = auth_data.user_id.to_owned(); 
     db_pool
         .transaction_http(&request, &user_id, async |user_id, db| {
-            meta.emit_api_metric("request.post_collection");
+            auth_data.emit_api_metric("request.post_collection");
             trace!("Collection: Post");
 
             // batches are a conceptual, singular update, so we should handle
@@ -457,7 +457,7 @@ pub async fn post_collection(
                 // simpler post_bsos call. Fallthrough in that case, instead of
                 // incurring post_collection_batch's overhead
                 if !(batch.id.is_none() && batch.commit) {
-                    return post_collection_batch(meta, coll, db).await;
+                    return post_collection_batch(auth_data, coll, db).await;
                 }
             }
 
@@ -491,11 +491,11 @@ pub async fn post_collection(
 // Append additional collection items into the given Batch, optionally commiting
 // the entire, accumulated if the `commit` flag is set.
 pub async fn post_collection_batch(
-    meta: JwtAuthData,
+    auth_data: JwtAuthData,
     coll: CollectionPostRequest,
     db: &mut dyn Db<Error = DbError>,
 ) -> Result<HttpResponse, ApiError> {
-    meta.emit_api_metric("request.post_collection_batch");
+    auth_data.emit_api_metric("request.post_collection_batch");
     trace!("Batch: Post collection batch");
     // Bail early if we have nonsensical arguments
     // TODO: issue932 may make these multi-level transforms easier
@@ -509,7 +509,7 @@ pub async fn post_collection_batch(
         // Validate the batch before attempting a full append (for efficiency)
         let is_valid = db
             .validate_batch(params::ValidateBatch {
-                user_id: meta.user_id.clone(),
+                user_id: auth_data.user_id.clone(),
                 collection: coll.collection.clone(),
                 id: id.clone(),
             })
@@ -518,7 +518,7 @@ pub async fn post_collection_batch(
         if is_valid {
             let usage = db
                 .get_quota_usage(params::GetQuotaUsage {
-                    user_id: meta.user_id.clone(),
+                    user_id: auth_data.user_id.clone(),
                     collection: coll.collection.clone(),
                 })
                 .await?;
@@ -536,14 +536,14 @@ pub async fn post_collection_batch(
     } else {
         trace!("Batch: Creating new batch");
         db.create_batch(params::CreateBatch {
-            user_id: meta.user_id.clone(),
+            user_id: auth_data.user_id.clone(),
             collection: coll.collection.clone(),
             bsos: vec![],
         })
         .await?
     };
 
-    let user_id = meta.user_id.clone();
+    let user_id = auth_data.user_id.clone();
     let collection = coll.collection.clone();
 
     let mut success = vec![];
@@ -679,14 +679,14 @@ pub async fn post_collection_batch(
     )
 )]
 pub async fn delete_bso(
-    meta: JwtAuthData,
+    auth_data: JwtAuthData,
     bso_req: BsoRequest,
     db_pool: DbTransactionPool,
     request: HttpRequest,
 ) -> Result<HttpResponse, ApiError> {
     db_pool
-        .transaction_http(&request, &meta.user_id, async |user_id, db| {
-            meta.emit_api_metric("request.delete_bso");
+        .transaction_http(&request, &auth_data.user_id, async |user_id, db| {
+            auth_data.emit_api_metric("request.delete_bso");
             let result = db
                 .delete_bso(params::DeleteBso {
                     user_id: user_id.clone(),
@@ -717,7 +717,7 @@ pub async fn delete_bso(
     )
 )]
 pub async fn get_bso(
-    meta: JwtAuthData,
+    auth_data: JwtAuthData,
     bso_req: BsoRequest,
     db_pool: DbTransactionPool,
     state: Data<ServerState>,
@@ -725,11 +725,11 @@ pub async fn get_bso(
 ) -> Result<HttpResponse, ApiError> {
     db_pool
         .transaction_http_then(
-            &request, &meta.user_id,
+            &request, &auth_data.user_id,
             async |db| {
-                meta.emit_api_metric("request.get_bso");
+                auth_data.emit_api_metric("request.get_bso");
                 db.get_bso(params::GetBso {
-                    user_id: meta.user_id.clone(),
+                    user_id: auth_data.user_id.clone(),
                     collection: bso_req.collection,
                     id: bso_req.bso,
                 })
@@ -769,7 +769,7 @@ pub async fn get_bso(
     )
 )]
 pub async fn put_bso(
-    meta: JwtAuthData,
+    auth_data: JwtAuthData,
     mut bso_req: BsoPutRequest,
     db_pool: DbTransactionPool,
     state: Data<ServerState>,
@@ -793,8 +793,8 @@ pub async fn put_bso(
     }
 
     db_pool
-        .transaction_http(&request, &meta.user_id, async |user_id, db| {
-            meta.emit_api_metric("request.put_bso");
+        .transaction_http(&request, &auth_data.user_id, async |user_id, db| {
+            auth_data.emit_api_metric("request.put_bso");
             let result = db
                 .put_bso(params::PutBso {
                     user_id: user_id.to_owned(),
