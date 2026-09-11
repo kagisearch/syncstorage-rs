@@ -2,6 +2,9 @@
     // Use IntelliSense to learn about possible attributes.
     // Hover to view descriptions of existing attributes.
     // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    //init command
+    //"command script import \"${env:HOME}/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/etc/lldb_lookup.py\"",
+    //is no longer necessary as long as the py feature is off
     "version": "0.2.0",
     "configurations": [
         {
@@ -18,7 +21,6 @@
                 "RUST_LOG": "debug"
             },
             "initCommands": [
-                "command script import \"${env:HOME}/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/etc/lldb_lookup.py\"",
                 "command source -s 0 \"${env:HOME}/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/etc/lldb_commands\""
             ],
             "program": "${workspaceFolder}/target/debug/syncserver",
