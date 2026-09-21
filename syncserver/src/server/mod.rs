@@ -202,7 +202,8 @@ macro_rules! build_app {
                         // (Specify "text/plain" for legacy client reasons)
                         web::JsonConfig::default()
                             .limit($limits.max_request_bytes as usize)
-                            .content_type(|ct| ct == mime::TEXT_PLAIN),
+                            .content_type(
+                                |ct| ct == mime::TEXT_PLAIN),
                     )
                     .route(web::delete().to(handlers::delete_collection))
                     .route(web::get().to(handlers::get_collection))

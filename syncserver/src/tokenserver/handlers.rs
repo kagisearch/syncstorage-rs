@@ -399,6 +399,7 @@ pub async fn test_error() -> Result<HttpResponse, TokenserverError> {
 mod tests {
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use std::cell::RefCell;
 
     use actix_web::middleware::ErrorHandlers;
     use actix_web::test::{self, TestRequest};
@@ -448,7 +449,9 @@ mod tests {
         ServerState {
             fxa_email_domain: "api.accounts.firefox.com".to_owned(),
             fxa_metrics_hash_secret: "topsecretz".to_owned(),
-            oauth_verifier: Box::new(MockVerifier::<oauth::VerifyOutput>::default()),
+            jwks_url: "".to_owned(),
+            oauth_request_timeout: 10,
+            oauth_verifier: RefCell::new(Box::new(MockVerifier::<oauth::VerifyOutput>::default())),
             db_pool,
             node_capacity_release_rate: None,
             node_type: Default::default(),

@@ -38,7 +38,7 @@ impl From<TokenClaims> for VerifyOutput {
     fn from(value: TokenClaims) -> Self {
         Self {
             fxa_uid: value.user,
-            role: "".to_owned(),//value.resource_access.roles.join(" "),
+            role: SYNC_ROLE.to_string().to_owned(),//it's called after validation so we know it's got the right role,
             generation: None, //--- IGNORE ---
         }
     }

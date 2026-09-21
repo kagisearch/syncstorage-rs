@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+
 #[allow(clippy::result_large_err)]
 pub mod extractors;
 #[allow(clippy::result_large_err)]
@@ -27,7 +29,9 @@ pub struct ServerState {
     pub db_pool: Box<dyn DbPool>,
     pub fxa_email_domain: String,
     pub fxa_metrics_hash_secret: String,
-    pub oauth_verifier: Box<dyn VerifyToken<JWTVerifierImpl, Output = oauth::VerifyOutput>>,
+    pub jwks_url: String,
+    pub oauth_request_timeout: u64,
+    pub oauth_verifier: RefCell<Box<dyn VerifyToken<JWTVerifierImpl, Output = oauth::VerifyOutput>>>,
     pub node_capacity_release_rate: Option<f32>,
     pub node_type: NodeType,
     pub metrics: Arc<StatsdClient>,
@@ -43,6 +47,11 @@ impl ServerState {
         metrics: Arc<StatsdClient>,
         #[allow(unused_variables)] blocking_threadpool: Arc<BlockingThreadpool>,
     ) -> Result<Self, ApiError> {
+        let jwks_url = format!("{}{}",
+            settings.fxa_oauth_server_url.trim_end_matches('/'),
+            "/realms/kagi/protocol/openid-connect/certs",
+        );
+        let oauth_request_timeout = 10;
         #[cfg(not(feature = "py_verifier"))]
         let oauth_verifier = {
             let mut jwk_verifiers: Vec<JWTVerifierImpl> = Vec::new();
@@ -62,9 +71,9 @@ impl ServerState {
                         .expect("Invalid secondary key, should either be fixed or removed"),
                 );
             }
-            Box::new(
+            RefCell::new(Box::new(
                 oauth::Verifier::new(jwk_verifiers)
-                    .expect("failed to create Tokenserver OAuth verifier"),
+                    .expect("failed to create Tokenserver OAuth verifier")),
             )
         };
 
@@ -103,6 +112,8 @@ impl ServerState {
         Ok(ServerState {
             fxa_email_domain: settings.fxa_email_domain.clone(),
             fxa_metrics_hash_secret: settings.fxa_metrics_hash_secret.clone(),
+            jwks_url,
+            oauth_request_timeout,
             oauth_verifier,
             db_pool,
             node_capacity_release_rate: settings.node_capacity_release_rate,

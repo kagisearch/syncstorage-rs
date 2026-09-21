@@ -297,6 +297,7 @@ pub async fn delete_collection(
         (status = 200, description = "BSOs retrieved successfully", content_type = "application/json"),
         (status = 401, description = "Unauthorized"),
         (status = 404, description = "Collection not found"),
+        (status = 412, description = "Precondition X-If-Unmodified-Since but the resource modfied timestamp is newer"),
     )
 )]
 pub async fn get_collection(

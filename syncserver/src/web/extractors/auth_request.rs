@@ -1,74 +1,18 @@
 use std::collections::HashMap;
 use actix_web::{Error, FromRequest, HttpRequest, dev::Payload, web::Data, http::Uri};
 use futures::future::{LocalBoxFuture};
-use std::{time::Duration};
-use serde::{Deserialize};
 
 use syncserver_common::{Metrics, Taggable};
-use tokenserver_common::TokenserverError;
 use syncstorage_db::UserIdentifier;
-use tokenserver_auth::{JWTVerifier, JWTVerifierImpl, oauth::VerifyOutput, TokenserverOrigin};
+use tokenserver_auth::{TokenserverOrigin};
 
 use crate::{
     error::{ApiError, ApiErrorKind},
     web::error::{ValidationErrorKind},
     web::extractors::{RequestErrorLocation},
-    tokenserver::extractors::{Token, KeyId},
+    tokenserver::extractors::{Token, KeyId, JwtWorker},
     server::{MetricsWrapper}
 };
-
-struct JwtWorker {}
-
-impl JwtWorker {
-
-    pub fn new() -> Result<Self, TokenserverError> {
-        Ok(JwtWorker{})
-    }
-
-    async fn get_remote_jwks(&self, state: &crate::server::ServerState) -> Result<Vec<JWTVerifierImpl>, Error> {
-        #[derive(Deserialize)]
-        struct KeysResponse<K> {
-            keys: Vec<K>,
-        }
-        let http_client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(state.oauth_request_timeout))
-            //.use_rustls_tls()
-            // Allow plain HTTP and be permissive for local/dev HTTPS (self-signed)
-            // `danger_accept_invalid_certs(true)` disables cert validation for HTTPS
-            // but does not affect plain `http://` connections which are allowed by default.
-            .danger_accept_invalid_certs(true)
-            .build()
-            .map_err(|_| TokenserverError::internal_error())?;
-        
-        http_client
-            .get(state.jwks_url.clone())
-            .send()
-            .await
-            .map_err(internal_err_with_ctx)?
-            .json::<KeysResponse<<JWTVerifierImpl as JWTVerifier>::Key>>()
-            .await
-            .map_err(internal_err_with_ctx)?
-            .keys
-            .into_iter()
-            .map(|key| key.try_into().map_err(internal_err_with_ctx))
-            .collect()
-    }
-
-    pub async fn verify_token(&self, state: &crate::server::ServerState, token: &String, metrics: &Metrics) -> Result<VerifyOutput, TokenserverError> {
-        if !state.oauth_verifier.borrow().is_valid() {
-            let verifiers = 
-                match self.get_remote_jwks(&state).await {
-                    Ok(v) => v,
-                    Err(e) => { return Err(resource_unavailable_err_with_ctx(e));}
-                };
-            info!("loaded jwks {:?}", verifiers);
-            state.oauth_verifier.borrow_mut().jwk_verifiers(verifiers);
-        }
-
-        state.oauth_verifier.borrow().verify(token, metrics).await
-    }
-
-}
 
 pub struct JwtAuthData {
     pub client_state: String,
@@ -83,7 +27,9 @@ pub struct JwtAuthData {
 
 impl JwtAuthData {
     fn uid_from_path(uri: &Uri) -> Result<u64, Error> {
-        // Accepts: "/1.5/12345" or "/1.5/12345/..."
+        //TODO we could use this instead:
+        //let path = req.match_info()
+        //path.get("uid")
         let uid_str = uri.path().split("/").nth(2).unwrap_or("");//0 element is an empty string.
 
         if uid_str.is_empty() {
@@ -145,7 +91,7 @@ impl FromRequest for JwtAuthData {
                     //using the get_remote_jwks from VerifyToken and move this method to JwtAuthData impl
                     let worker = Box::new(JwtWorker::new())
                         .expect("failed to create JwtWorker");
-                    let verify_output = worker.verify_token(state, &token, &metrics).await?;
+                    let verify_output = worker.verify_token(&state, &token, &metrics).await?;
 
                     // For requests using OAuth, the keys_changed_at and client state are embedded
                     // in the X-KeyID header.
@@ -186,11 +132,4 @@ fn get_server_state(req: &HttpRequest) -> Result<&Data<crate::server::ServerStat
         })
 }
 
-fn resource_unavailable_err_with_ctx<E: std::fmt::Display>(err: E) -> TokenserverError {
-    TokenserverError::resource_unavailable(err.to_string())
-}
 
-fn internal_err_with_ctx<E: std::fmt::Display>(e: E) -> Error {
-    let err: ApiError = ApiErrorKind::Internal(e.to_string()).into();
-    err.into()
-}

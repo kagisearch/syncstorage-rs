@@ -6,11 +6,12 @@
 use core::fmt::Debug;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH, Duration};
+//use std::error::Error;
 
 use actix_web::{
     FromRequest, HttpRequest,
-    dev::Payload,
+    dev::Payload, Error,
     web::{Data, Query},
 };
 use base64::{Engine, engine};
@@ -22,17 +23,23 @@ use lazy_static::lazy_static;
 use regex::Regex;
 use serde::Deserialize;
 use sha2::Sha256;
-use syncserver_common::Taggable;
+use syncserver_common::{Metrics, Taggable};
 use syncserver_settings::Secrets;
-use tokenserver_auth::{FxaWebhookClaims, crypto::JWTVerifyErrorKind};
+use tokenserver_auth::{FxaWebhookClaims, crypto::JWTVerifyErrorKind,JWTVerifier, JWTVerifierImpl, oauth::VerifyOutput};
 use tokenserver_common::{ErrorLocation, NodeType, TokenserverError};
 use tokenserver_db::{Db, DbPool, SYNC_SERVICE_NAME, params, results};
 
 use super::{LogItemsMutator, ServerState, TokenserverMetrics};
-use crate::server::MetricsWrapper;
+use crate::{
+    error::{ApiError, ApiErrorKind},
+    server::MetricsWrapper
+};
+
 
 lazy_static! {
     static ref CLIENT_STATE_REGEX: Regex = Regex::new("^[a-zA-Z0-9._-]{1,32}$").unwrap();
+    static ref EMAIL_REGEX: Regex = Regex::new(r"^[^@]+@[^@]+\.[^@]+$").unwrap();//permissive
+    //= Regex::new(r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*$").unwrap(); restrictive
 }
 
 /// Information from the request needed to process a Tokenserver request.
@@ -189,7 +196,7 @@ impl FromRequest for TokenserverRequest {
             let mut log_items_mutator = LogItemsMutator::from(&req);
             let auth_data = AuthData::extract(&req).await?;
 
-            let state = get_server_state(&req)?.as_ref();
+            let state = get_tokenserver_state(&req)?.as_ref();
             let shared_secret = get_secret(&req)?;
             let fxa_metrics_hash_secret = &state.fxa_metrics_hash_secret.as_bytes();
 
@@ -337,7 +344,7 @@ impl FromRequest for DbPoolWrapper {
         let req = req.clone();
 
         Box::pin(async move {
-            let state = get_server_state(&req)?.as_ref();
+            let state = get_tokenserver_state(&req)?.as_ref();
 
             Ok(Self(state.db_pool.clone()))
         })
@@ -406,6 +413,82 @@ impl FromRequest for Token {
     }
 }
 
+fn internal_err_with_ctx<E: std::fmt::Display>(e: E) -> Error {
+    let err: ApiError = ApiErrorKind::Internal(e.to_string()).into();
+    err.into()
+}
+
+fn resource_unavailable_err_with_ctx<E: std::fmt::Display>(err: E) -> TokenserverError {
+    TokenserverError::resource_unavailable(err.to_string())
+}
+
+pub struct JwtWorker {}
+
+impl JwtWorker {
+
+    pub fn new() -> Result<Self, TokenserverError> {
+        Ok(JwtWorker{})
+    }
+
+    async fn get_remote_jwks(&self, oauth_request_timeout: u64, jwk_url: &String) -> Result<Vec<JWTVerifierImpl>, Error> {
+        #[derive(Deserialize)]
+        struct KeysResponse<K> {
+            keys: Vec<K>,
+        }
+        let http_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(oauth_request_timeout))
+            //.use_rustls_tls()
+            // Allow plain HTTP and be permissive for local/dev HTTPS (self-signed)
+            // `danger_accept_invalid_certs(true)` disables cert validation for HTTPS
+            // but does not affect plain `http://` connections which are allowed by default.
+            .danger_accept_invalid_certs(true)
+            .build()
+            .map_err(|_| TokenserverError::internal_error())?;
+        
+        http_client
+            .get(jwk_url.clone())
+            .send()
+            .await
+            .map_err(internal_err_with_ctx)?
+            .json::<KeysResponse<<JWTVerifierImpl as JWTVerifier>::Key>>()
+            .await
+            .map_err(internal_err_with_ctx)?
+            .keys
+            .into_iter()
+            .map(|key| key.try_into().map_err(internal_err_with_ctx))
+            .collect()
+    }
+
+    pub async fn verify_identity(&self, state: &ServerState, token: &String, metrics: &Metrics) -> Result<VerifyOutput, TokenserverError> {
+        if !state.oauth_verifier.borrow().is_valid() {
+            let verifiers = 
+                match self.get_remote_jwks(state.oauth_request_timeout, &state.jwks_url).await {
+                    Ok(v) => v,
+                    Err(e) => { return Err(resource_unavailable_err_with_ctx(e));}
+                };
+            info!("loaded jwks {:?}", verifiers);
+            state.oauth_verifier.borrow_mut().jwk_verifiers(verifiers);
+        }
+
+        state.oauth_verifier.borrow().verify(token, metrics).await
+    }
+
+    pub async fn verify_token(&self, state: &crate::server::ServerState, token: &String, metrics: &Metrics) -> Result<VerifyOutput, TokenserverError> {
+        if !state.oauth_verifier.borrow().is_valid() {
+            let verifiers = 
+                match self.get_remote_jwks(state.oauth_request_timeout, &state.jwks_url).await {
+                    Ok(v) => v,
+                    Err(e) => { return Err(resource_unavailable_err_with_ctx(e));}
+                };
+            info!("loaded jwks {:?}", verifiers);
+            state.oauth_verifier.borrow_mut().jwk_verifiers(verifiers);
+        }
+
+        state.oauth_verifier.borrow().verify(token, metrics).await
+    }
+
+}
+
 /// The data extracted from the authentication token.
 #[derive(Debug, Default, Eq, PartialEq)]
 pub struct AuthData {
@@ -424,7 +507,7 @@ impl FromRequest for AuthData {
         let req = req.clone();
 
         Box::pin(async move {
-            let state = get_server_state(&req)?.as_ref();
+            let state = get_tokenserver_state(&req)?.as_ref();
             let token = Token::extract(&req).await?;
 
             let TokenserverMetrics(mut metrics) = TokenserverMetrics::extract(&req).await?;
@@ -449,14 +532,19 @@ impl FromRequest for AuthData {
                     let mut tags = HashMap::default();
                     tags.insert("token_type".to_owned(), "OAuth".to_owned());
                     metrics.start_timer("token_verification", Some(tags));
-                    let verify_output = state.oauth_verifier.verify(&token, &metrics).await?;
+                    let worker = Box::new(JwtWorker::new())
+                        .expect("failed to create JwtWorker");
+                    let verify_output = worker.verify_identity(state, &token, &metrics).await?;
 
                     // For requests using OAuth, the keys_changed_at and client state are embedded
                     // in the X-KeyID header.
                     let key_id = KeyId::extract(&req).await?;
                     let fxa_uid = verify_output.fxa_uid;
-                    let email = format!("{}@{}", fxa_uid, state.fxa_email_domain);
-
+                    let email = if EMAIL_REGEX.is_match(fxa_uid.as_str()) {
+                        fxa_uid.clone()
+                    } else {
+                        format!("{}@{}", fxa_uid, state.fxa_email_domain)
+                    };
                     Ok(AuthData {
                         client_state: key_id.client_state,
                         email,
@@ -629,7 +717,7 @@ impl FromRequest for FxaWebhookToken {
         let req = req.clone();
 
         Box::pin(async move {
-            let state = get_server_state(&req)?;
+            let state = get_tokenserver_state(&req)?;
             let Token::JWT(token) = Token::extract(&req).await?;
 
             for verifier in &state.set_verifiers {
@@ -659,7 +747,7 @@ impl FromRequest for FxaWebhookToken {
     }
 }
 
-fn get_server_state(req: &HttpRequest) -> Result<&Data<ServerState>, TokenserverError> {
+fn get_tokenserver_state(req: &HttpRequest) -> Result<&Data<ServerState>, TokenserverError> {
     req.app_data::<Data<ServerState>>()
         .ok_or_else(|| TokenserverError {
             context: "Failed to load the application state".to_owned(),
@@ -704,7 +792,7 @@ fn hash_device_id(fxa_uid: &str, hmac_key: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    use std::cell::RefCell;
     use actix_web::{
         HttpResponse,
         dev::ServiceResponse,
@@ -1349,7 +1437,9 @@ mod tests {
         ServerState {
             fxa_email_domain: "test.com".to_owned(),
             fxa_metrics_hash_secret: "".to_owned(),
-            oauth_verifier: Box::new(oauth_verifier),
+            jwks_url: "".to_owned(),
+            oauth_request_timeout: 10,
+            oauth_verifier: RefCell::new(Box::new(oauth_verifier)),
             db_pool: Box::new(MockTokenserverPool::new()),
             node_capacity_release_rate: None,
             node_type: NodeType::default(),
@@ -1372,7 +1462,9 @@ mod tests {
         ServerState {
             fxa_email_domain: "test.com".to_owned(),
             fxa_metrics_hash_secret: "".to_owned(),
-            oauth_verifier: Box::new(MockVerifier::<oauth::VerifyOutput>::default()),
+            jwks_url: "".to_owned(),
+            oauth_request_timeout: 10,
+            oauth_verifier: RefCell::new(Box::new(MockVerifier::<oauth::VerifyOutput>::default())),
             db_pool: Box::new(MockTokenserverPool::new()),
             node_capacity_release_rate: None,
             node_type: NodeType::default(),
