@@ -89,9 +89,8 @@ impl FromRequest for JwtAuthData {
                     //create the verifier at the boot strap time only if the jwk is available ,
                     //otherwise create it here after we've loaded the keys from the remote server
                     //using the get_remote_jwks from VerifyToken and move this method to JwtAuthData impl
-                    let worker = Box::new(JwtWorker::new())
-                        .expect("failed to create JwtWorker");
-                    let verify_output = worker.verify_token(&state, &token, &metrics).await?;
+                    let verify_output = JwtWorker::verify_token(&state.oauth_verifier
+                        , &state.jwks_url, state.oauth_request_timeout, &token, &metrics).await?;
 
                     // For requests using OAuth, the keys_changed_at and client state are embedded
                     // in the X-KeyID header.

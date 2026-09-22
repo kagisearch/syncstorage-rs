@@ -6,6 +6,7 @@
 use core::fmt::Debug;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::cell::RefCell;
 use std::time::{SystemTime, UNIX_EPOCH, Duration};
 //use std::error::Error;
 
@@ -25,7 +26,8 @@ use serde::Deserialize;
 use sha2::Sha256;
 use syncserver_common::{Metrics, Taggable};
 use syncserver_settings::Secrets;
-use tokenserver_auth::{FxaWebhookClaims, crypto::JWTVerifyErrorKind,JWTVerifier, JWTVerifierImpl, oauth::VerifyOutput};
+use tokenserver_auth::{FxaWebhookClaims, crypto::JWTVerifyErrorKind,JWTVerifier, JWTVerifierImpl, oauth::VerifyOutput, VerifyToken};
+
 use tokenserver_common::{ErrorLocation, NodeType, TokenserverError};
 use tokenserver_db::{Db, DbPool, SYNC_SERVICE_NAME, params, results};
 
@@ -55,6 +57,7 @@ pub struct TokenserverRequest {
     pub node_type: NodeType,
 }
 
+//TODO: is this gonna be usefull for anthing at all?
 impl TokenserverRequest {
     /// Performs an elaborate set of consistency checks on the
     /// provided claims, which we expect to behave as follows:
@@ -77,6 +80,12 @@ impl TokenserverRequest {
     /// of the FxA server may not have been sending all the expected fields, and
     /// that some clients do not report the `generation` timestamp.
     fn validate(&self) -> Result<(), TokenserverError> {
+        if self.auth_data.keys_changed_at.is_none() {
+            //TODO: we'll wave X-KeyID presence requirements for now and see if that's gonna be any useful in the future for anything
+            //OAuth doesn't require this header as the comments in the source code claim.
+            //PS: When we are here it can only mean that the header wasn't present.
+            return Ok(());
+        }
         let auth_keys_changed_at = self.auth_data.keys_changed_at;
         let auth_generation = self.auth_data.generation;
         let user_keys_changed_at = self.user.keys_changed_at;
@@ -184,6 +193,7 @@ impl TokenserverRequest {
         Ok(())
     }
 }
+
 
 impl FromRequest for TokenserverRequest {
     type Error = TokenserverError;
@@ -296,6 +306,8 @@ impl FromRequest for TokenserverRequest {
                 node_type: state.node_type,
             };
 
+            //TODO: we'll wave the key changed and client states validations for now.
+            //Let's see if we find it useful for anything at all later
             tokenserver_request.validate()?;
 
             Ok(tokenserver_request)
@@ -422,19 +434,14 @@ fn resource_unavailable_err_with_ctx<E: std::fmt::Display>(err: E) -> Tokenserve
     TokenserverError::resource_unavailable(err.to_string())
 }
 
-pub struct JwtWorker {}
+pub struct JwtWorker {
+    jwk_url: String,
+    http_client: reqwest::Client,
+}
 
 impl JwtWorker {
 
-    pub fn new() -> Result<Self, TokenserverError> {
-        Ok(JwtWorker{})
-    }
-
-    async fn get_remote_jwks(&self, oauth_request_timeout: u64, jwk_url: &String) -> Result<Vec<JWTVerifierImpl>, Error> {
-        #[derive(Deserialize)]
-        struct KeysResponse<K> {
-            keys: Vec<K>,
-        }
+    fn new(jwk_url: &String, oauth_request_timeout: u64) -> Result<Self, TokenserverError> {
         let http_client = reqwest::Client::builder()
             .timeout(Duration::from_secs(oauth_request_timeout))
             //.use_rustls_tls()
@@ -444,9 +451,21 @@ impl JwtWorker {
             .danger_accept_invalid_certs(true)
             .build()
             .map_err(|_| TokenserverError::internal_error())?;
+
+        Ok(JwtWorker {
+            jwk_url: jwk_url.clone(),
+            http_client,
+        })
+    }
+
+    async fn get_remote_jwks(&self) -> Result<Vec<JWTVerifierImpl>, Error> {
+        #[derive(Deserialize)]
+        struct KeysResponse<K> {
+            keys: Vec<K>,
+        }
         
-        http_client
-            .get(jwk_url.clone())
+        self.http_client
+            .get(self.jwk_url.clone())
             .send()
             .await
             .map_err(internal_err_with_ctx)?
@@ -459,32 +478,21 @@ impl JwtWorker {
             .collect()
     }
 
-    pub async fn verify_identity(&self, state: &ServerState, token: &String, metrics: &Metrics) -> Result<VerifyOutput, TokenserverError> {
-        if !state.oauth_verifier.borrow().is_valid() {
+    pub async fn verify_token(oauth_verifier: &RefCell<Box<dyn VerifyToken<JWTVerifierImpl, Output = VerifyOutput>>>
+            , jwk_url: &String, oauth_request_timeout: u64,token: &String, metrics: &Metrics) -> Result<VerifyOutput, TokenserverError> {
+        if !oauth_verifier.borrow().is_valid() {
+            let worker = Box::new(JwtWorker::new(jwk_url, oauth_request_timeout))
+                .expect("failed to create JwtWorker");
             let verifiers = 
-                match self.get_remote_jwks(state.oauth_request_timeout, &state.jwks_url).await {
+                match worker.get_remote_jwks().await {
                     Ok(v) => v,
                     Err(e) => { return Err(resource_unavailable_err_with_ctx(e));}
                 };
             info!("loaded jwks {:?}", verifiers);
-            state.oauth_verifier.borrow_mut().jwk_verifiers(verifiers);
+            oauth_verifier.borrow_mut().jwk_verifiers(verifiers);
         }
 
-        state.oauth_verifier.borrow().verify(token, metrics).await
-    }
-
-    pub async fn verify_token(&self, state: &crate::server::ServerState, token: &String, metrics: &Metrics) -> Result<VerifyOutput, TokenserverError> {
-        if !state.oauth_verifier.borrow().is_valid() {
-            let verifiers = 
-                match self.get_remote_jwks(state.oauth_request_timeout, &state.jwks_url).await {
-                    Ok(v) => v,
-                    Err(e) => { return Err(resource_unavailable_err_with_ctx(e));}
-                };
-            info!("loaded jwks {:?}", verifiers);
-            state.oauth_verifier.borrow_mut().jwk_verifiers(verifiers);
-        }
-
-        state.oauth_verifier.borrow().verify(token, metrics).await
+        oauth_verifier.borrow().verify(token, metrics).await
     }
 
 }
@@ -532,9 +540,8 @@ impl FromRequest for AuthData {
                     let mut tags = HashMap::default();
                     tags.insert("token_type".to_owned(), "OAuth".to_owned());
                     metrics.start_timer("token_verification", Some(tags));
-                    let worker = Box::new(JwtWorker::new())
-                        .expect("failed to create JwtWorker");
-                    let verify_output = worker.verify_identity(state, &token, &metrics).await?;
+                    let verify_output = JwtWorker::verify_token(&state.oauth_verifier
+                        , &state.jwks_url, state.oauth_request_timeout, &token, &metrics).await?;
 
                     // For requests using OAuth, the keys_changed_at and client state are embedded
                     // in the X-KeyID header.
@@ -617,7 +624,9 @@ impl FromRequest for KeyId {
             let x_key_id_header = match headers.get("X-KeyID") {
                 Some(header) => Some(header),
                 _ => return Ok(KeyId {
-                    client_state: String::new(),
+                    //since we tolerate absence of the 'X-KeyID' header we do need to supply some random string
+                    //, matching the client state regex, for the client state as it's non nullable field in the user db table
+                    client_state: "6fd7430f3418d3d868f0d351df22565cf3e0c1d5".to_owned(),
                     keys_changed_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
                 }),
             };
