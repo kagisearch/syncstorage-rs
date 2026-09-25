@@ -263,7 +263,7 @@ impl FromRequest for TokenserverRequest {
                 .get_or_create_user(params::GetOrCreateUser {
                     service_id,
                     email: auth_data.email.clone(),
-                    generation: auth_data.generation.unwrap_or(0),
+                    generation: auth_data.generation.unwrap_or(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64),
                     client_state: auth_data.client_state.clone(),
                     keys_changed_at: auth_data.keys_changed_at,
                     capacity_release_rate: state.node_capacity_release_rate,
@@ -282,6 +282,7 @@ impl FromRequest for TokenserverRequest {
                             location: ErrorLocation::Url,
                             ..Default::default()
                         })?;
+        info!("req.query_string() {}", req.query_string());
 
                 // An error in the "duration" query parameter should never cause a request to fail.
                 // Instead, we should simply resort to using the default token duration.
@@ -625,9 +626,9 @@ impl FromRequest for KeyId {
                 Some(header) => Some(header),
                 _ => return Ok(KeyId {
                     //since we tolerate absence of the 'X-KeyID' header we do need to supply some random string
-                    //, matching the client state regex, for the client state as it's non nullable field in the user db table
-                    client_state: "6fd7430f3418d3d868f0d351df22565cf3e0c1d5".to_owned(),
-                    keys_changed_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
+                    //, matching the CLIENT_STATE_REGEX, for the client state as it's non nullable field in the user db table
+                    client_state: "6fd7430f3418d3d868f0d351df22565c".to_owned(),
+                    keys_changed_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64,
                 }),
             };
             let x_key_id = x_key_id_header

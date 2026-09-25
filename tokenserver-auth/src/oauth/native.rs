@@ -17,9 +17,12 @@ pub struct ResourceAccess {
 #[serde(rename_all = "snake_case")]
 pub struct TokenClaims {
     #[serde(rename = "sub")]
-    pub user: String,
+    pub user_id: String,
     #[serde(rename = "azp")]
     pub client: String,
+    //these 2 claims below unfortunately depend on the auth server.
+    #[serde(rename = "preferred_username")]
+    pub user: String,
     pub resource_access: ResourceAccess,
 }
 

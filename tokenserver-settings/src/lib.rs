@@ -92,7 +92,7 @@ impl Default for Settings {
             fxa_email_domain: "api-accounts.stage.mozaws.net".to_owned(),
             fxa_metrics_hash_secret: "secret".to_owned(),
             fxa_oauth_server_url: "https://oauth.stage.mozaws.net".to_owned(),
-            fxa_oauth_request_timeout: 10,
+            fxa_oauth_request_timeout: 30,
             fxa_oauth_primary_jwk: None,
             fxa_oauth_secondary_jwk: None,
             node_capacity_release_rate: None,

@@ -458,7 +458,7 @@ impl Server {
                     settings.tokenserver.fxa_oauth_server_url.trim_end_matches('/'),
                     "/realms/kagi/protocol/openid-connect/certs",
                 ),
-                oauth_request_timeout: 10,
+                oauth_request_timeout: 30,
                 oauth_verifier: {
                     let mut jwk_verifiers: Vec<JWTVerifierImpl> = Vec::new();
                     if let Some(primary) = &settings.tokenserver.fxa_oauth_primary_jwk {
